@@ -4,27 +4,16 @@ import type { SeasonBadgeMintConfig } from './modules/season-badge-mint.js'
  * Единая конфигурация текущего сезона.
  * Смена сезона и порога завершённости — в одном месте.
  */
-export const CURRENT_SEASON = 10
+export const CURRENT_SEASON = 11
 /** Порог поинтов для статуса «завершён» (>= включительно). */
 export const POINTS_LIMIT_SEASON = 81
 
 /**
  * Если `true`, completed-кошельки (`seasonScore >= POINTS_LIMIT_SEASON`)
  * НЕ исключаются из работы parallel-executor: они продолжают попадать в
- * итерацию, но для них принудительно запускается ТОЛЬКО `Startale GM`
- * модуль (на остальные модули газ не тратится).
+ * итерацию с обычной ротацией модулей.
  *
- * Активные кошельки (`seasonScore < POINTS_LIMIT_SEASON`) — обычная
- * ротация модулей, как и раньше.
- *
- * Защита от дабл-GM в один UTC-день обеспечивается on-chain:
- * `DailyCheckIn.hasCheckedInToday(SA)` внутри `performStartaleGm`.
- *
- * Сценарий использования: после того как все кошельки набрали 81+ поинтов
- * на сезон, мы хотим продолжать собирать ежедневные GM-поинты на платформе
- * Startale, не тратя газ на бесполезные Aave/Morpho/MMP действия.
- *
- * Если `false` — старое поведение: completed-кошельки полностью
+ * Если `false` — completed-кошельки полностью
  * исключаются из работы.
  */
 export const GM_IGNORE_POINTS_LIMIT = false

@@ -1,11 +1,6 @@
 import { formatUnits, formatEther } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { SoneiumSwap } from './jumper.js'
-import { redeem as redeemMorphoLiquidity, isMorphoNotEnoughLiquidityError } from './morpho.js'
-import { redeemLiquidity as redeemStargateLiquidity } from './stargate.js'
-import { redeemLiquidity, classifySakeWithdrawRuntimeHandling } from './sake-finance.js'
-import { redeemLiquidity as redeemAaveLiquidity } from './aave.js'
-import { getUntitledBankWithdrawPreview, withdraw as withdrawFromUntitledBank } from './untitled-bank.js'
 import { rpcManager, soneiumChain } from '../rpc-manager.js'
 import { safeWriteContract } from '../transaction-utils.js'
 import { logger } from '../logger.js'
@@ -18,10 +13,9 @@ const TOKENS = {
   USDSC: '0x3f99231dD03a9F0E7e3421c92B7b90fbe012985a'
 } as const
 
-// Адреса контрактов протоколов
+// Адреса контрактов протоколов (остаточные балансы Season 10)
 const PROTOCOL_CONTRACTS = {
   // Aave
-  AAVE_L2_POOL: '0xdd3d7a7d03d9fd9ef45f3e587287922ef65ca38b',
   AAVE_A_TOKEN: '0xb2C9E934A55B58D20496A5019F8722a96d8A44d8',
 
   // Morpho
@@ -29,7 +23,6 @@ const PROTOCOL_CONTRACTS = {
 
   // Stargate
   STARGATE_POOL: '0x45f1A95A4D3f3836523F5c83673c797f4d4d263B',
-  STARGATE_LP_TOKEN: '0x5b091dc6f94b5e2b54edab3800759abf0ed7d26d',
 
   // Sake Finance
   SAKE_ATOKEN: '0x4491B60c8fdD668FcC2C4dcADf9012b3fA71a726',
@@ -125,22 +118,7 @@ interface CollectionResult {
   error?: string
 }
 
-type WithdrawalExecutionOutcome = 'withdrawn' | 'skipped' | 'failed'
 
-export function resolveCollectorWithdrawalOutcome (
-  protocol: string,
-  transactionHash: string | null | undefined
-): WithdrawalExecutionOutcome {
-  if (transactionHash) {
-    return 'withdrawn'
-  }
-
-  if (protocol === 'Untitled Bank' || protocol === 'Stargate' || protocol === 'Sake Finance') {
-    return 'skipped'
-  }
-
-  return 'failed'
-}
 
 export class SoneiumCollector {
   private privateKey: `0x${string}`
@@ -516,14 +494,11 @@ export class SoneiumCollector {
    */
   async checkUntitledBankLiquidity (): Promise<LiquidityInfo> {
     try {
-      const preview = await getUntitledBankWithdrawPreview(this.account.address)
-      const hasLiquidity = preview.plan.status === 'available' && preview.plan.sharesToRedeem > 0n
-      const balance = hasLiquidity ? preview.plan.sharesToRedeem : 0n
-
+      const balance = await this.getTokenBalance(PROTOCOL_CONTRACTS.UNTITLED_BANK)
       return {
         protocol: 'Untitled Bank',
-        hasLiquidity,
-        balance: hasLiquidity ? formatUnits(balance, 6) : '0',
+        hasLiquidity: balance > 0n,
+        balance: formatUnits(balance, 6),
         balanceWei: balance,
         tokenAddress: PROTOCOL_CONTRACTS.UNTITLED_BANK
       }
@@ -555,136 +530,13 @@ export class SoneiumCollector {
   }
 
   /**
-   * Вывести ликвидность из протокола Aave
-   */
-  async withdrawFromAave (): Promise<boolean> {
-    try {
-
-      // Используем улучшенную функцию из модуля AAVE с gas estimation и retry
-      const transactionHash = await redeemAaveLiquidity(this.privateKey)
-
-      if (transactionHash) {
-        return true
-      } else {
-        logger.error('Ошибка вывода ликвидности из Aave')
-        return false
-      }
-    } catch (error) {
-      logger.error('Ошибка вывода из Aave', error)
-      return false
-    }
-  }
-
-  /**
-   * Вывести ликвидность из протокола Morpho
-   */
-  async withdrawFromMorpho (): Promise<WithdrawalExecutionOutcome> {
-    try {
-      const transactionHash = await redeemMorphoLiquidity(this.privateKey, null)
-      return transactionHash ? 'withdrawn' : 'failed'
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (isMorphoNotEnoughLiquidityError(message)) {
-        logger.warn('[Morpho] Недостаточно ликвидности в vault — попробуйте позже')
-        return 'skipped'
-      }
-      return 'failed'
-    }
-  }
-
-  /**
-   * Вывести ликвидность из протокола Stargate
-   */
-  async withdrawFromStargate (amount: bigint): Promise<WithdrawalExecutionOutcome> {
-    try {
-      const transactionHash = await redeemStargateLiquidity(this.privateKey, formatUnits(amount, 6))
-      return resolveCollectorWithdrawalOutcome('Stargate', transactionHash)
-    } catch (error) {
-      logger.error('Ошибка вывода из Stargate', error)
-      return 'failed'
-    }
-  }
-
-  /**
-   * Вывести ликвидность из всех протоколов
-   */
-  async withdrawAllLiquidity (liquidityInfo: LiquidityInfo[]): Promise<LiquidityInfo[]> {
-    const withdrawnLiquidity: LiquidityInfo[] = []
-
-    for (const info of liquidityInfo) {
-      if (!info.hasLiquidity || info.balanceWei === 0n) continue
-
-      let outcome: WithdrawalExecutionOutcome = 'failed'
-
-      switch (info.protocol) {
-      case 'Aave':
-        outcome = await this.withdrawFromAave() ? 'withdrawn' : 'failed'
-        break
-      case 'Morpho':
-        outcome = await this.withdrawFromMorpho()
-        break
-      case 'Stargate':
-        outcome = await this.withdrawFromStargate(info.balanceWei)
-        break
-      case 'Sake Finance':
-        outcome = await this.withdrawFromSakeFinance()
-        break
-      case 'Untitled Bank':
-        outcome = await this.withdrawFromUntitledBank()
-        break
-      }
-
-      if (outcome === 'withdrawn') {
-        withdrawnLiquidity.push(info)
-      } else if (outcome === 'failed') {
-        logger.error(`Ошибка вывода ликвидности из ${info.protocol}`)
-      }
-    }
-
-    return withdrawnLiquidity
-  }
-
-  /**
-   * Вывести ликвидность из Sake Finance (ERC20 токен)
-   */
-  async withdrawFromSakeFinance (): Promise<WithdrawalExecutionOutcome> {
-    try {
-      const transactionHash = await redeemLiquidity(this.privateKey)
-      return resolveCollectorWithdrawalOutcome('Sake Finance', transactionHash)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const handling = classifySakeWithdrawRuntimeHandling(message)
-      if (handling.skip) {
-        logger.warn(`[Sake] Вывод пропущен: ${handling.message}`)
-        return 'skipped'
-      }
-      logger.error('Ошибка вывода из Sake Finance', error)
-      return 'failed'
-    }
-  }
-
-  /**
-   * Вывести ликвидность из Untitled Bank
-   */
-  async withdrawFromUntitledBank (): Promise<WithdrawalExecutionOutcome> {
-    try {
-      const transactionHash = await withdrawFromUntitledBank(this.privateKey)
-      return resolveCollectorWithdrawalOutcome('Untitled Bank', transactionHash)
-    } catch (error) {
-      logger.error('Ошибка вывода из Untitled Bank', error)
-      return 'failed'
-    }
-  }
-
-  /**
-   * Основная функция сбора
+   * Основная функция сбора: проверяет остаточные балансы и свапит токены в ETH
    */
   async performCollection (): Promise<CollectionResult> {
     try {
       const walletAddress = this.getWalletAddress()
       const initialETHBalance = await this.getETHBalance()
       const liquidityInfo = await this.checkAllLiquidity()
-      const withdrawnLiquidity = await this.withdrawAllLiquidity(liquidityInfo)
       const collectedTokens = await this.collectTokens()
       const finalETHBalance = await this.getETHBalance()
       const totalCollected = (parseFloat(finalETHBalance) - parseFloat(initialETHBalance)).toString()
@@ -696,7 +548,7 @@ export class SoneiumCollector {
         finalETHBalance,
         collectedTokens,
         liquidityFound: liquidityInfo.filter(info => info.hasLiquidity),
-        withdrawnLiquidity,
+        withdrawnLiquidity: [],
         totalCollected
       }
 

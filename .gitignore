@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+dist/
+
+# Secrets & keys — NEVER commit these
+keys.txt
+keys.encrypted
+keys.salt
+mexc_api.txt
+proxy.txt
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+
+# Exports
+exports/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HAR files (may contain auth tokens)
+*.har

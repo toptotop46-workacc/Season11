@@ -324,11 +324,6 @@ export class MEXCWithdraw {
     } catch (error) {
       logger.error('Ошибка при проверке доступности средств', error)
 
-      if (error instanceof Error) {
-        logger.error(`Детали ошибки: ${error.message}`)
-        logger.error(`Stack trace: ${error.stack}`)
-      }
-
       return false
     }
   }
@@ -360,11 +355,6 @@ export class MEXCWithdraw {
       return isValid
     } catch (error) {
       logger.error('Ошибка при проверке минимальной суммы', error)
-
-      if (error instanceof Error) {
-        logger.error(`Детали ошибки: ${error.message}`)
-        logger.error(`Stack trace: ${error.stack}`)
-      }
 
       return false
     }

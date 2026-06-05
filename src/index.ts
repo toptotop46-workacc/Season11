@@ -5,6 +5,8 @@ import { MenuSystem } from './menu-system.js'
 import { ParallelExecutor } from './parallel-executor.js'
 import { Banner } from './banner.js'
 import { logger } from './logger.js'
+import { shutdownManager } from './shutdown.js'
+import { validateAndLogKeys } from './validators/key-validator.js'
 
 // Глобальные экземпляры систем
 let transactionChecker: TransactionChecker | null = null
@@ -34,6 +36,19 @@ async function main (): Promise<void> {
       return
     }
 
+    // Загружаем и валидируем ключи при старте
+    let privateKeys: string[]
+    if (KeyEncryption.hasEncryptedKeys()) {
+      privateKeys = await KeyEncryption.promptPasswordWithRetry()
+    } else {
+      privateKeys = KeyEncryption.loadPlainKeys()
+    }
+
+    if (!validateAndLogKeys(privateKeys)) {
+      logger.error('Исправьте невалидные ключи и перезапустите приложение.')
+      return
+    }
+
     // Инициализируем checker для индивидуальных проверок
     transactionChecker = new TransactionChecker()
 
@@ -48,32 +63,16 @@ async function main (): Promise<void> {
 
   } catch (error) {
     if (error instanceof Error && error.message === 'WRONG_PASSWORD') {
-      logger.info('До свидания!')
-      process.exit(0)
+      await shutdownManager.shutdown(0, 'Неверный пароль')
     } else {
       logger.error('КРИТИЧЕСКАЯ ОШИБКА ПРИЛОЖЕНИЯ', error instanceof Error ? error : undefined)
-      process.exit(1)
+      await shutdownManager.shutdown(1, 'Критическая ошибка')
     }
   }
 }
 
-// Обработка сигналов завершения
-process.on('SIGINT', () => {
-  logger.info('Получен сигнал завершения (Ctrl+C)')
-  logger.info('Остановка приложения...')
-  logger.info('До свидания!')
-  process.exit(0)
-})
-
-process.on('SIGTERM', () => {
-  logger.info('Получен сигнал завершения (SIGTERM)')
-  logger.info('Остановка приложения...')
-  logger.info('До свидания!')
-  process.exit(0)
-})
-
-// Запуск приложения
-main().catch((error) => {
+// Запуск приложения (SIGINT/SIGTERM handled by shutdownManager)
+main().catch(async (error) => {
   logger.error('Необработанная ошибка', error)
-  process.exit(1)
+  await shutdownManager.shutdown(1, 'Необработанная ошибка')
 })

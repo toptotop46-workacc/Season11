@@ -2,6 +2,7 @@ import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as readline from 'readline'
 import { logger } from './logger.js'
+import { shutdownManager } from './shutdown.js'
 
 export class KeyEncryption {
   private static readonly ALGORITHM = 'aes-256-cbc'
@@ -146,7 +147,7 @@ export class KeyEncryption {
           return true
         } catch (error) {
           logger.error('Ошибка при шифровании', error instanceof Error ? error : undefined)
-          process.exit(1)
+          void shutdownManager.shutdown(1)
         }
       }
     }
@@ -174,7 +175,7 @@ export class KeyEncryption {
           logger.info('Остановка приложения...')
           // Удаляем все обработчики перед выходом
           cleanup()
-          process.exit(0)
+          void shutdownManager.shutdown(0)
         }
       }
 
@@ -190,7 +191,7 @@ export class KeyEncryption {
           logger.info('Получен сигнал завершения (SIGTERM)')
           logger.info('Остановка приложения...')
           cleanup()
-          process.exit(0)
+          void shutdownManager.shutdown(0)
         }
       }
 

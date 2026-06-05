@@ -76,6 +76,22 @@ export class Logger {
     }
   }
 
+  /** Raw console output without timestamp/level — for CLI menus and UI chrome */
+  print (message: string = ''): void {
+    console.log(message)
+  }
+
+  /** Print a horizontal separator line */
+  separator (char: string = '=', length: number = 80): void {
+    console.log(char.repeat(length))
+  }
+
+  /** Print a section header with separators */
+  header (title: string): void {
+    console.log(`\n${title}`)
+    console.log('='.repeat(80))
+  }
+
   moduleStart (moduleName: string): void {
     this.info(`[${moduleName}] Старт`)
   }

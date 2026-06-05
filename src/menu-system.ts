@@ -1,25 +1,24 @@
-import prompts from 'prompts'
+import { ask } from './typed-prompts.js'
 import { privateKeyToAccount } from 'viem/accounts'
 import { ParallelExecutor } from './parallel-executor.js'
 import { logger } from './logger.js'
 import { SoneiumCollector } from './modules/collector.js'
+import { performStargateEthDeposit, performStargateEthWithdraw } from './modules/stargate-eth.js'
 import { performWalletTopup } from './wallet-topup.js'
 import { GasChecker } from './gas-checker.js'
 import { ProxyManager } from './proxy-manager.js'
 import { performSeasonBadgeMint } from './modules/season-badge-mint.js'
-import { performStargateEthDeposit, performStargateEthWithdraw } from './modules/stargate-eth.js'
 import axios from 'axios'
 import ExcelJS from 'exceljs'
 import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { CURRENT_SEASON, POINTS_LIMIT_SEASON, BADGE_MINT_CONFIG } from './season-config.js'
+import { shutdownManager } from './shutdown.js'
+import { config } from './config.js'
+import { backoffDelay, sleep } from './backoff.js'
 
-/** Конфиг бонусных заданий текущего сезона: один столбец на каждое задание (season 10) */
+/** Конфиг бонусных заданий текущего сезона (season 11) */
 const BONUS_QUEST_COLUMNS: Array<{ dappId: string, columns: Array<{ key: string, header: string }> }> = [
-  { dappId: 'startale_10', columns: [{ key: 'startale_gm', header: 'Startale GM' }, { key: 'startale_invite', header: 'Startale Invite' }] },
-  { dappId: 'burrowbash_10', columns: [{ key: 'burrowbash_play', header: 'Burrow Bash Play' }] },
-  { dappId: 'morningmoon_10', columns: [{ key: 'morningmoon_plant', header: 'Morning Moon Plant' }] },
-  { dappId: 'worldoftrinity_10', columns: [{ key: 'worldoftrinity_pack', header: 'WoT Starter Pack' }, { key: 'worldoftrinity_games', header: 'WoT Join 3' }] }
 ]
 
 /** Плоский список всех бонусных колонок для таблицы и Excel */
@@ -114,10 +113,10 @@ export class MenuSystem {
    * Обработчик отмены (Ctrl+C) для prompts
    */
   private handleCancel (): void {
-    console.log('\n\nПолучен сигнал завершения (Ctrl+C)')
-    console.log('Остановка приложения...')
-    console.log('До свидания!')
-    process.exit(0)
+    logger.print('\n\nПолучен сигнал завершения (Ctrl+C)')
+    logger.print('Остановка приложения...')
+    logger.print('До свидания!')
+    void shutdownManager.shutdown(0)
   }
 
   /**
@@ -128,7 +127,7 @@ export class MenuSystem {
     this.parallelExecutor.clearPreselectedWallets()
     this.parallelExecutor.clearExcludedModules()
     try {
-      const response = await prompts({
+      const response = await ask({
         type: 'select',
         name: 'action',
         message: 'Выберите действие:',
@@ -170,8 +169,7 @@ export class MenuSystem {
           }
         ],
         initial: 0
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!response || !response['action']) {
         this.handleCancel()
@@ -191,15 +189,15 @@ export class MenuSystem {
       } else if (response['action'] === 'season-badge-mint') {
         await this.showSeasonBadgeMintMenu()
       } else if (response['action'] === 'exit') {
-        console.log('\nДо свидания!')
-        process.exit(0)
+        logger.print('\nДо свидания!')
+        void shutdownManager.shutdown(0)
       } else {
-        console.log('\nНеверный выбор. Попробуйте снова.')
+        logger.print('\nНеверный выбор. Попробуйте снова.')
         await this.showMainMenu()
       }
     } catch (error) {
       logger.error('Ошибка в главном меню', error)
-      process.exit(1)
+      void shutdownManager.shutdown(1)
     }
   }
 
@@ -212,12 +210,12 @@ export class MenuSystem {
       const availableModules = this.parallelExecutor.getAvailableModules()
       const maxThreads = availableModules.length
 
-      console.log('\nЗАПУСК РАБОТЫ')
-      console.log('='.repeat(80))
-      console.log(`Введите количество потоков (1-${maxThreads}):`)
-      console.log(`Если потоков > 1, каждый будет выполнять уникальный модуль (максимум ${maxThreads})`)
+      logger.print('\nЗАПУСК РАБОТЫ')
+      logger.print('='.repeat(80))
+      logger.print(`Введите количество потоков (1-${maxThreads}):`)
+      logger.print(`Если потоков > 1, каждый будет выполнять уникальный модуль (максимум ${maxThreads})`)
 
-      const response = await prompts({
+      const response = await ask({
         type: 'number',
         name: 'threadCount',
         message: 'Количество потоков:',
@@ -230,8 +228,7 @@ export class MenuSystem {
           }
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!response || response['threadCount'] === undefined) {
         this.handleCancel()
@@ -239,10 +236,10 @@ export class MenuSystem {
       }
 
       if (response['threadCount']) {
-        console.log(`\nВыбрано ${response['threadCount']} потоков`)
+        logger.print(`\nВыбрано ${response['threadCount']} потоков`)
 
         // Выбор режима работы с кошельками
-        const walletModeResponse = await prompts({
+        const walletModeResponse = await ask({
           type: 'select',
           name: 'walletMode',
           message: 'Выберите режим работы с кошельками:',
@@ -259,8 +256,7 @@ export class MenuSystem {
             }
           ],
           initial: 0
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any)
+        })
 
         if (!walletModeResponse || !walletModeResponse['walletMode']) {
           this.handleCancel()
@@ -268,7 +264,7 @@ export class MenuSystem {
         }
 
         if (!walletModeResponse['walletMode']) {
-          console.log('\nНеверный выбор. Попробуйте снова.')
+          logger.print('\nНеверный выбор. Попробуйте снова.')
           await this.showThreadSelectionMenu()
           return
         }
@@ -279,15 +275,15 @@ export class MenuSystem {
           // Показываем меню выбора кошельков
           selectedWallets = await this.showWalletSelectionMenu()
           if (!selectedWallets || selectedWallets.length === 0) {
-            console.log('\nНе выбрано ни одного кошелька. Операция отменена.')
+            logger.print('\nНе выбрано ни одного кошелька. Операция отменена.')
             await this.showMainMenu()
             return
           }
-          console.log(`\nВыбрано ${selectedWallets.length} кошельков для работы`)
+          logger.print(`\nВыбрано ${selectedWallets.length} кошельков для работы`)
         }
 
         // Выбор модулей для работы
-        const moduleSelectionResponse = await prompts({
+        const moduleSelectionResponse = await ask({
           type: 'select',
           name: 'selectModules',
           message: 'Выбрать модули для работы?',
@@ -304,8 +300,7 @@ export class MenuSystem {
             }
           ],
           initial: 0
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any)
+        })
 
         if (!moduleSelectionResponse || moduleSelectionResponse['selectModules'] === undefined) {
           this.handleCancel()
@@ -315,7 +310,7 @@ export class MenuSystem {
         if (moduleSelectionResponse['selectModules'] === 'yes') {
           const selectedModules = await this.showModuleSelectionMenu()
           if (selectedModules === null || selectedModules.length === 0) {
-            console.log('\nНе выбрано ни одного модуля. Операция отменена.')
+            logger.print('\nНе выбрано ни одного модуля. Операция отменена.')
             await this.showMainMenu()
             return
           }
@@ -328,9 +323,9 @@ export class MenuSystem {
               .filter(name => !selectedModules.includes(name))
 
             this.parallelExecutor.setExcludedModules(excludedModules)
-            console.log(`\nВыбрано ${selectedModules.length} модулей для работы: ${selectedModules.join(', ')}`)
+            logger.print(`\nВыбрано ${selectedModules.length} модулей для работы: ${selectedModules.join(', ')}`)
             if (excludedModules.length > 0) {
-              console.log(`Исключено ${excludedModules.length} модулей: ${excludedModules.join(', ')}`)
+              logger.print(`Исключено ${excludedModules.length} модулей: ${excludedModules.join(', ')}`)
             }
           } catch (error) {
             logger.error('Ошибка при установке модулей', error)
@@ -342,7 +337,7 @@ export class MenuSystem {
           this.parallelExecutor.clearExcludedModules()
         }
 
-        const gasResponse = await prompts({
+        const gasResponse = await ask({
           type: 'number',
           name: 'maxGasPrice',
           message: 'Максимальная цена газа в ETH mainnet (Gwei):',
@@ -355,8 +350,7 @@ export class MenuSystem {
             if (value > 100) return 'Максимальное значение: 100 Gwei'
             return true
           }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any)
+        })
 
         if (!gasResponse || gasResponse['maxGasPrice'] === undefined) {
           this.handleCancel()
@@ -364,13 +358,13 @@ export class MenuSystem {
         }
 
         if (!gasResponse['maxGasPrice']) {
-          console.log('\nНеверное значение газа. Попробуйте снова.')
+          logger.print('\nНеверное значение газа. Попробуйте снова.')
           await this.showThreadSelectionMenu()
           return
         }
 
         const gasChecker = new GasChecker(gasResponse['maxGasPrice'])
-        console.log(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
+        logger.print(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
 
         // Устанавливаем предвыбранные кошельки, если они были выбраны
         if (selectedWallets) {
@@ -379,19 +373,19 @@ export class MenuSystem {
           this.parallelExecutor.clearPreselectedWallets()
         }
 
-        console.log('Запуск параллельного выполнения...')
-        console.log('Для остановки нажмите Ctrl+C')
-        console.log('='.repeat(80))
+        logger.print('Запуск параллельного выполнения...')
+        logger.print('Для остановки нажмите Ctrl+C')
+        logger.print('='.repeat(80))
 
         // Запускаем параллельное выполнение с проверкой газа
         await this.parallelExecutor.executeInfiniteLoop(response['threadCount'], gasChecker)
       } else {
-        console.log('\nНеверный выбор. Попробуйте снова.')
+        logger.print('\nНеверный выбор. Попробуйте снова.')
         await this.showThreadSelectionMenu()
       }
     } catch (error) {
       logger.error('Ошибка в меню выбора потоков', error)
-      process.exit(1)
+      void shutdownManager.shutdown(1)
     }
   }
 
@@ -400,13 +394,13 @@ export class MenuSystem {
    */
   private async showWalletSelectionMenu (): Promise<{ privateKey: `0x${string}`, address: string }[] | null> {
     try {
-      console.log('\nВЫБОР КОШЕЛЬКОВ')
-      console.log('='.repeat(80))
+      logger.print('\nВЫБОР КОШЕЛЬКОВ')
+      logger.print('='.repeat(80))
 
       const allPrivateKeys = await this.getAllPrivateKeys()
 
       if (allPrivateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         return null
       }
 
@@ -428,14 +422,13 @@ export class MenuSystem {
       }))
 
       // Показываем меню выбора
-      const response = await prompts({
+      const response = await ask({
         type: 'multiselect',
         name: 'selectedAddresses',
         message: `Выберите кошельки для работы (найдено ${wallets.length}):`,
         choices: choices,
         hint: '- Пробел для выбора, Enter для подтверждения'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!response) {
         this.handleCancel()
@@ -478,13 +471,13 @@ export class MenuSystem {
    */
   private async showModuleSelectionMenu (): Promise<string[] | null> {
     try {
-      console.log('\nВЫБОР МОДУЛЕЙ ДЛЯ РАБОТЫ')
-      console.log('='.repeat(80))
+      logger.print('\nВЫБОР МОДУЛЕЙ ДЛЯ РАБОТЫ')
+      logger.print('='.repeat(80))
 
       const allModules = this.parallelExecutor.getAvailableModules()
 
       if (allModules.length === 0) {
-        console.log('Не найдено модулей')
+        logger.print('Не найдено модулей')
         return null
       }
 
@@ -496,15 +489,14 @@ export class MenuSystem {
       }))
 
       // Показываем меню выбора
-      const response = await prompts({
+      const response = await ask({
         type: 'multiselect',
         name: 'selectedModules',
         message: `Выберите модули для работы (найдено ${allModules.length}):`,
         choices: choices,
         min: 1,
         hint: '- Пробел для выбора, Enter для подтверждения'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!response) {
         this.handleCancel()
@@ -532,11 +524,11 @@ export class MenuSystem {
    */
   private async executeCollectorForAllWallets (): Promise<void> {
     try {
-      console.log('\nСБОР БАЛАНСОВ В ETH')
-      console.log('='.repeat(80))
+      logger.print('\nСБОР БАЛАНСОВ В ETH')
+      logger.print('='.repeat(80))
 
       // Запрос максимальной цены газа
-      const gasResponse = await prompts({
+      const gasResponse = await ask({
         type: 'number',
         name: 'maxGasPrice',
         message: 'Максимальная цена газа в ETH mainnet (Gwei):',
@@ -549,8 +541,7 @@ export class MenuSystem {
           if (value > 100) return 'Максимальное значение: 100 Gwei'
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!gasResponse || gasResponse['maxGasPrice'] === undefined) {
         this.handleCancel()
@@ -558,28 +549,28 @@ export class MenuSystem {
       }
 
       if (!gasResponse['maxGasPrice']) {
-        console.log('\nНеверное значение газа. Попробуйте снова.')
+        logger.print('\nНеверное значение газа. Попробуйте снова.')
         await this.showMainMenu()
         return
       }
 
       const gasChecker = new GasChecker(gasResponse['maxGasPrice'])
-      console.log(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
+      logger.print(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
 
       const privateKeys = await this.getAllPrivateKeys()
 
       if (privateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         await this.showMainMenu()
         return
       }
 
       const shuffledKeys = this.shuffleArray(privateKeys)
 
-      console.log(`Найдено ${shuffledKeys.length} кошельков`)
-      console.log('Начинаем сбор...')
-      console.log('Для остановки нажмите Ctrl+C')
-      console.log('='.repeat(80))
+      logger.print(`Найдено ${shuffledKeys.length} кошельков`)
+      logger.print('Начинаем сбор...')
+      logger.print('Для остановки нажмите Ctrl+C')
+      logger.print('='.repeat(80))
 
       // Выполняем collector для каждого кошелька
       let successCount = 0
@@ -590,12 +581,12 @@ export class MenuSystem {
         const privateKey = shuffledKeys[i]!
         const account = privateKeyToAccount(privateKey)
 
-        console.log(`\nКОШЕЛЕК ${i + 1}/${shuffledKeys.length}:`)
-        console.log('-'.repeat(50))
-        console.log(`Адрес: ${account.address}`)
+        logger.print(`\nКОШЕЛЕК ${i + 1}/${shuffledKeys.length}:`)
+        logger.print('-'.repeat(50))
+        logger.print(`Адрес: ${account.address}`)
 
         try {
-          console.log('Проверяем цену газа...')
+          logger.print('Проверяем цену газа...')
           await gasChecker.waitForGasPriceToDrop()
 
           const collector = new SoneiumCollector(privateKey)
@@ -603,22 +594,22 @@ export class MenuSystem {
 
           if (result.success) {
             successCount++
-            console.log(`Успешно собрано: ${result.totalCollected} ETH`)
-            console.log(`Собрано токенов: ${result.collectedTokens.length}`)
-            console.log(`Найдена ликвидность в: ${result.liquidityFound.length} протоколах`)
-            console.log(`Выведена ликвидность из: ${result.withdrawnLiquidity.length} протоколов`)
+            logger.print(`Успешно собрано: ${result.totalCollected} ETH`)
+            logger.print(`Собрано токенов: ${result.collectedTokens.length}`)
+            logger.print(`Найдена ликвидность в: ${result.liquidityFound.length} протоколах`)
+            logger.print(`Выведена ликвидность из: ${result.withdrawnLiquidity.length} протоколов`)
           } else {
             errorCount++
-            console.log(`Ошибка: ${result.error}`)
+            logger.print(`Ошибка: ${result.error}`)
           }
         } catch (error) {
           errorCount++
-          console.log(`Критическая ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
+          logger.print(`Критическая ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
         }
 
         if (i < shuffledKeys.length - 1) {
-          console.log('Пауза 3 секунды...')
-          await new Promise(resolve => setTimeout(resolve, 3000))
+          logger.print('Пауза 3 секунды...')
+          await sleep(3000)
         }
       }
 
@@ -627,14 +618,14 @@ export class MenuSystem {
       const totalTime = (endTime - startTime) / 1000
       this.showCollectorStatistics(successCount, errorCount, shuffledKeys.length, totalTime)
 
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
 
     } catch (error) {
       logger.error('Ошибка при сборе балансов', error)
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
     }
   }
@@ -653,17 +644,17 @@ export class MenuSystem {
       let privateKeys: string[] = []
 
       if (KeyEncryption.hasEncryptedKeys()) {
-        console.log('Получаем все приватные ключи из зашифрованного хранилища...')
+        logger.print('Получаем все приватные ключи из зашифрованного хранилища...')
         privateKeys = await KeyEncryption.promptPasswordWithRetry()
       } else if (KeyEncryption.hasPlainKeys()) {
-        console.log('Получаем все приватные ключи из keys.txt...')
+        logger.print('Получаем все приватные ключи из keys.txt...')
         privateKeys = KeyEncryption.loadPlainKeys()
       } else {
         throw new Error('Не найдены ключи!')
       }
 
       this.cachedPrivateKeys = privateKeys as `0x${string}`[]
-      console.log(`Загружено ${this.cachedPrivateKeys.length} приватных ключей`)
+      logger.print(`Загружено ${this.cachedPrivateKeys.length} приватных ключей`)
 
       return this.cachedPrivateKeys
     } catch (error) {
@@ -689,10 +680,10 @@ export class MenuSystem {
    */
   // Конфигурация для статистики (порог из season-config)
   private readonly STATS_CONFIG = {
-    timeout: 10000,            // Timeout в мс
-    retryAttempts: 10,         // Попытки повтора
-    pointsLimit: POINTS_LIMIT_SEASON,  // Лимит поинтов для статуса 'done' (из season-config)
-    baseUrl: 'https://portal.soneium.org/api'
+    timeout: config.statsApiTimeout,
+    retryAttempts: config.statsApiRetryAttempts,
+    pointsLimit: POINTS_LIMIT_SEASON,
+    baseUrl: config.statsApiBaseUrl
   }
 
   /**
@@ -898,9 +889,8 @@ export class MenuSystem {
         lastError = error instanceof Error ? error.message : 'Неизвестная ошибка'
       }
 
-      // Задержка между попытками для избежания рейт-лимита
       if (attempt < this.STATS_CONFIG.retryAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 2000))
+        await sleep(backoffDelay(attempt, { baseMs: 2000 }))
       }
     }
 
@@ -1019,9 +1009,8 @@ export class MenuSystem {
         lastError = error instanceof Error ? error.message : 'Неизвестная ошибка'
       }
 
-      // Задержка между попытками для избежания рейт-лимита
       if (attempt < this.STATS_CONFIG.retryAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 2000))
+        await sleep(backoffDelay(attempt, { baseMs: 2000 }))
       }
     }
 
@@ -1089,22 +1078,22 @@ export class MenuSystem {
    */
   private async showStatistics (): Promise<void> {
     try {
-      console.log('\nСТАТИСТИКА ПО КОШЕЛЬКАМ')
-      console.log('='.repeat(80))
-      console.log('Получаем актуальные данные через API с прокси...')
+      logger.print('\nСТАТИСТИКА ПО КОШЕЛЬКАМ')
+      logger.print('='.repeat(80))
+      logger.print('Получаем актуальные данные через API с прокси...')
 
       // Получаем все приватные ключи
       const privateKeys = await this.getAllPrivateKeys()
 
       if (privateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         await this.showMainMenu()
         return
       }
 
       const addresses = privateKeys.map(pk => privateKeyToAccount(pk).address)
 
-      console.log(`Проверяем ${addresses.length} кошельков...`)
+      logger.print(`Проверяем ${addresses.length} кошельков...`)
 
       // Счетчик для прогресс-бара
       let completedCount = 0
@@ -1201,12 +1190,12 @@ export class MenuSystem {
 
         // Задержка между батчами (кроме последнего)
         if (i + BATCH_SIZE < addresses.length) {
-          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY))
+          await sleep(BATCH_DELAY)
         }
       }
 
       // Завершаем прогресс-бар
-      console.log('\n')
+      logger.print('\n')
 
       // Сортируем результаты по исходному индексу для правильной нумерации
       results.sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0))
@@ -1238,9 +1227,9 @@ export class MenuSystem {
         `Season ${CURRENT_SEASON}`.padEnd(W_SEASON),
         ...BONUS_QUEST_COLUMNS_FLAT.map((c, i) => c.header.padEnd(colWidths[3 + i]!))
       ]
-      console.log(topLine)
-      console.log('│' + headerCells.map((c, i) => padToVisible(c, colWidths[i]!)).join('│') + '│')
-      console.log(midLine)
+      logger.print(topLine)
+      logger.print('│' + headerCells.map((c, i) => padToVisible(c, colWidths[i]!)).join('│') + '│')
+      logger.print(midLine)
 
       const formatQuest = (quest: string, width: number): string => {
         const padded = quest.padStart(width)
@@ -1273,21 +1262,20 @@ export class MenuSystem {
 
         const bonusCells = BONUS_QUEST_COLUMNS_FLAT.map((c, i) => formatQuest(result.bonusQuests[c.key] ?? 'N/A', colWidths[3 + i]!))
         const rowCells = [walletNumber, address, seasonStr, ...bonusCells]
-        console.log('│' + rowCells.map((c, i) => padToVisible(c, colWidths[i]!)).join('│') + '│')
+        logger.print('│' + rowCells.map((c, i) => padToVisible(c, colWidths[i]!)).join('│') + '│')
       })
 
-      console.log(botLine)
+      logger.print(botLine)
 
-      console.log('='.repeat(80))
+      logger.print('='.repeat(80))
 
       // Предложение экспорта в Excel
-      const exportResponse = await prompts({
+      const exportResponse = await ask({
         type: 'confirm',
         name: 'value',
         message: 'Экспортировать статистику в Excel файл?',
         initial: true
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!exportResponse) {
         this.handleCancel()
@@ -1296,10 +1284,10 @@ export class MenuSystem {
 
       if (exportResponse['value']) {
         try {
-          console.log('\nСоздание Excel файла...')
+          logger.print('\nСоздание Excel файла...')
           const filePath = await this.exportStatisticsToExcel(results)
-          console.log('\nСтатистика успешно экспортирована!')
-          console.log(`Путь к файлу: ${filePath}`)
+          logger.print('\nСтатистика успешно экспортирована!')
+          logger.print(`Путь к файлу: ${filePath}`)
         } catch (error) {
           logger.error('Ошибка при экспорте в Excel', error)
         }
@@ -1318,16 +1306,16 @@ export class MenuSystem {
    * Показывает статистику выполнения collector
    */
   private showCollectorStatistics (successCount: number, errorCount: number, totalCount: number, totalTime: number): void {
-    console.log('\nФИНАЛЬНАЯ СТАТИСТИКА СБОРА')
-    console.log('='.repeat(80))
-    console.log(`Всего кошельков: ${totalCount}`)
-    console.log(`Успешно обработано: ${successCount}`)
-    console.log(`Ошибок: ${errorCount}`)
-    console.log(`Общее время: ${totalTime.toFixed(2)} секунд`)
-    console.log(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
-    console.log('='.repeat(80))
-    console.log('СБОР ЗАВЕРШЕН!')
-    console.log('='.repeat(80))
+    logger.print('\nФИНАЛЬНАЯ СТАТИСТИКА СБОРА')
+    logger.print('='.repeat(80))
+    logger.print(`Всего кошельков: ${totalCount}`)
+    logger.print(`Успешно обработано: ${successCount}`)
+    logger.print(`Ошибок: ${errorCount}`)
+    logger.print(`Общее время: ${totalTime.toFixed(2)} секунд`)
+    logger.print(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
+    logger.print('='.repeat(80))
+    logger.print('СБОР ЗАВЕРШЕН!')
+    logger.print('='.repeat(80))
   }
 
   /**
@@ -1335,19 +1323,18 @@ export class MenuSystem {
    */
   private async showTopupMenu (): Promise<void> {
     try {
-      console.log('\nПОПОЛНЕНИЕ КОШЕЛЬКОВ ETH В СЕТИ SONEIUM')
-      console.log('='.repeat(80))
+      logger.print('\nПОПОЛНЕНИЕ КОШЕЛЬКОВ ETH В СЕТИ SONEIUM')
+      logger.print('='.repeat(80))
 
       // 1. Минимальная сумма
-      const minAmount = await prompts({
+      const minAmount = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите минимальную сумму пополнения (USD):',
         initial: 10,
         min: 1,
         validate: (value: number) => value > 0 ? true : 'Сумма должна быть больше 0'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!minAmount || minAmount['value'] === undefined) {
         this.handleCancel()
@@ -1355,15 +1342,14 @@ export class MenuSystem {
       }
 
       // 2. Максимальная сумма
-      const maxAmount = await prompts({
+      const maxAmount = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите максимальную сумму пополнения (USD):',
         initial: 50,
         min: minAmount['value'],
         validate: (value: number) => value >= minAmount['value'] ? true : 'Максимальная сумма должна быть больше или равна минимальной'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!maxAmount || maxAmount['value'] === undefined) {
         this.handleCancel()
@@ -1371,15 +1357,14 @@ export class MenuSystem {
       }
 
       // 3. Минимальная задержка
-      const minDelay = await prompts({
+      const minDelay = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите минимальную задержку между кошельками (минуты):',
         initial: 2,
         min: 1,
         validate: (value: number) => value >= 1 ? true : 'Задержка должна быть не менее 1 минуты'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!minDelay || minDelay['value'] === undefined) {
         this.handleCancel()
@@ -1387,15 +1372,14 @@ export class MenuSystem {
       }
 
       // 4. Максимальная задержка
-      const maxDelay = await prompts({
+      const maxDelay = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите максимальную задержку между кошельками (минуты):',
         initial: 5,
         min: minDelay['value'],
         validate: (value: number) => value >= minDelay['value'] ? true : 'Максимальная задержка должна быть больше или равна минимальной'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!maxDelay || maxDelay['value'] === undefined) {
         this.handleCancel()
@@ -1403,7 +1387,7 @@ export class MenuSystem {
       }
 
       // 5. Запрос максимальной цены газа
-      const gasResponse = await prompts({
+      const gasResponse = await ask({
         type: 'number',
         name: 'maxGasPrice',
         message: 'Максимальная цена газа в ETH mainnet (Gwei):',
@@ -1416,8 +1400,7 @@ export class MenuSystem {
           if (value > 100) return 'Максимальное значение: 100 Gwei'
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!gasResponse || gasResponse['maxGasPrice'] === undefined) {
         this.handleCancel()
@@ -1425,24 +1408,23 @@ export class MenuSystem {
       }
 
       if (!gasResponse['maxGasPrice']) {
-        console.log('\nНеверное значение газа. Попробуйте снова.')
+        logger.print('\nНеверное значение газа. Попробуйте снова.')
         await this.showTopupMenu()
         return
       }
 
-      console.log('\nНастройки пополнения:')
-      console.log(`Сумма: $${minAmount['value']} - $${maxAmount['value']}`)
-      console.log(`Задержки: ${minDelay['value']} - ${maxDelay['value']} минут`)
-      console.log(`Лимит газа: ${gasResponse['maxGasPrice']} Gwei`)
-      console.log('='.repeat(80))
+      logger.print('\nНастройки пополнения:')
+      logger.print(`Сумма: $${minAmount['value']} - $${maxAmount['value']}`)
+      logger.print(`Задержки: ${minDelay['value']} - ${maxDelay['value']} минут`)
+      logger.print(`Лимит газа: ${gasResponse['maxGasPrice']} Gwei`)
+      logger.print('='.repeat(80))
 
-      const confirm = await prompts({
+      const confirm = await ask({
         type: 'confirm',
         name: 'value',
         message: 'Запустить пополнение с этими настройками?',
         initial: true
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!confirm) {
         this.handleCancel()
@@ -1451,11 +1433,11 @@ export class MenuSystem {
 
       if (confirm['value']) {
         const gasChecker = new GasChecker(gasResponse['maxGasPrice'])
-        console.log(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
+        logger.print(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
 
         await this.executeTopupForAllWallets(minAmount['value'], maxAmount['value'], minDelay['value'], maxDelay['value'], gasChecker)
       } else {
-        console.log('Пополнение отменено')
+        logger.print('Пополнение отменено')
         await this.showMainMenu()
       }
     } catch (error) {
@@ -1469,24 +1451,24 @@ export class MenuSystem {
    */
   private async executeTopupForAllWallets (minUSD: number, maxUSD: number, minDelay: number, maxDelay: number, gasChecker?: GasChecker): Promise<void> {
     try {
-      console.log('\nЗАПУСК ПОПОЛНЕНИЯ КОШЕЛЬКОВ')
-      console.log('='.repeat(80))
+      logger.print('\nЗАПУСК ПОПОЛНЕНИЯ КОШЕЛЬКОВ')
+      logger.print('='.repeat(80))
 
       // Получаем все приватные ключи
       const privateKeys = await this.getAllPrivateKeys()
 
       if (privateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         await this.showMainMenu()
         return
       }
 
       const shuffledKeys = this.shuffleArray(privateKeys)
 
-      console.log(`Найдено ${shuffledKeys.length} кошельков`)
-      console.log('Начинаем пополнение...')
-      console.log('Для остановки нажмите Ctrl+C')
-      console.log('='.repeat(80))
+      logger.print(`Найдено ${shuffledKeys.length} кошельков`)
+      logger.print('Начинаем пополнение...')
+      logger.print('Для остановки нажмите Ctrl+C')
+      logger.print('='.repeat(80))
 
       // Выполняем пополнение для каждого кошелька
       let successCount = 0
@@ -1497,9 +1479,9 @@ export class MenuSystem {
         const privateKey = shuffledKeys[i]!
         const account = privateKeyToAccount(privateKey)
 
-        console.log(`\nПОПОЛНЕНИЕ КОШЕЛЬКА ${i + 1}/${shuffledKeys.length}:`)
-        console.log('-'.repeat(50))
-        console.log(`Адрес: ${account.address}`)
+        logger.print(`\nПОПОЛНЕНИЕ КОШЕЛЬКА ${i + 1}/${shuffledKeys.length}:`)
+        logger.print('-'.repeat(50))
+        logger.print(`Адрес: ${account.address}`)
 
         try {
           // Вызываем реальный модуль пополнения
@@ -1514,13 +1496,13 @@ export class MenuSystem {
 
           if (result.success) {
             successCount++
-            console.log('Пополнение выполнено успешно!')
-            console.log(`Сумма: $${result.amountUSD.toFixed(2)} (${result.amountETH} ETH)`)
+            logger.print('Пополнение выполнено успешно!')
+            logger.print(`Сумма: $${result.amountUSD.toFixed(2)} (${result.amountETH} ETH)`)
             if (result.mexcWithdrawId) {
-              console.log(`MEXC ID: ${result.mexcWithdrawId}`)
+              logger.print(`MEXC ID: ${result.mexcWithdrawId}`)
             }
             if (result.bridgeTxHash) {
-              console.log(`Bridge TX: ${result.bridgeTxHash}`)
+              logger.print(`Bridge TX: ${result.bridgeTxHash}`)
             }
           } else {
             throw new Error(result.error || 'Неизвестная ошибка пополнения')
@@ -1528,7 +1510,7 @@ export class MenuSystem {
 
         } catch (error) {
           errorCount++
-          console.log(`Ошибка пополнения: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
+          logger.print(`Ошибка пополнения: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
         }
 
         // Задержка между кошельками (кроме последнего)
@@ -1536,8 +1518,8 @@ export class MenuSystem {
           const delayMinutes = Math.random() * (maxDelay - minDelay) + minDelay
           const delayMs = delayMinutes * 60 * 1000
 
-          console.log(`Пауза ${delayMinutes.toFixed(2)} минут (${Math.round(delayMs / 1000)} секунд) до следующего кошелька...`)
-          await new Promise(resolve => setTimeout(resolve, delayMs))
+          logger.print(`Пауза ${delayMinutes.toFixed(2)} минут (${Math.round(delayMs / 1000)} секунд) до следующего кошелька...`)
+          await sleep(delayMs)
         }
       }
 
@@ -1546,14 +1528,14 @@ export class MenuSystem {
       const totalTime = (endTime - startTime) / 1000
       this.showTopupStatistics(successCount, errorCount, shuffledKeys.length, totalTime)
 
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
 
     } catch (error) {
       logger.error('Ошибка при пополнении кошельков', error)
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
     }
   }
@@ -1562,16 +1544,16 @@ export class MenuSystem {
    * Показывает статистику выполнения пополнения
    */
   private showTopupStatistics (successCount: number, errorCount: number, totalCount: number, totalTime: number): void {
-    console.log('\nФИНАЛЬНАЯ СТАТИСТИКА ПОПОЛНЕНИЯ')
-    console.log('='.repeat(80))
-    console.log(`Всего кошельков: ${totalCount}`)
-    console.log(`Успешно пополнено: ${successCount}`)
-    console.log(`Ошибок: ${errorCount}`)
-    console.log(`Общее время: ${totalTime.toFixed(2)} секунд`)
-    console.log(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
-    console.log('='.repeat(80))
-    console.log('ПОПОЛНЕНИЕ ЗАВЕРШЕНО!')
-    console.log('='.repeat(80))
+    logger.print('\nФИНАЛЬНАЯ СТАТИСТИКА ПОПОЛНЕНИЯ')
+    logger.print('='.repeat(80))
+    logger.print(`Всего кошельков: ${totalCount}`)
+    logger.print(`Успешно пополнено: ${successCount}`)
+    logger.print(`Ошибок: ${errorCount}`)
+    logger.print(`Общее время: ${totalTime.toFixed(2)} секунд`)
+    logger.print(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
+    logger.print('='.repeat(80))
+    logger.print('ПОПОЛНЕНИЕ ЗАВЕРШЕНО!')
+    logger.print('='.repeat(80))
   }
 
   /**
@@ -1579,10 +1561,10 @@ export class MenuSystem {
    */
   private async showStargateEthMenu (): Promise<void> {
     try {
-      console.log('\nЛИКВИДНОСТЬ STARGATE (ETH)')
-      console.log('='.repeat(80))
+      logger.print('\nЛИКВИДНОСТЬ STARGATE (ETH)')
+      logger.print('='.repeat(80))
 
-      const actionResponse = await prompts({
+      const actionResponse = await ask({
         type: 'select',
         name: 'action',
         message: 'Выберите операцию:',
@@ -1599,8 +1581,7 @@ export class MenuSystem {
           }
         ],
         initial: 0
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!actionResponse || !actionResponse['action']) {
         this.handleCancel()
@@ -1609,7 +1590,7 @@ export class MenuSystem {
 
       const operation = actionResponse['action'] as 'deposit' | 'withdraw'
 
-      const gasResponse = await prompts({
+      const gasResponse = await ask({
         type: 'number',
         name: 'maxGasPrice',
         message: 'Максимальная цена газа в ETH mainnet (Gwei):',
@@ -1622,8 +1603,7 @@ export class MenuSystem {
           if (value > 100) return 'Максимальное значение: 100 Gwei'
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!gasResponse || gasResponse['maxGasPrice'] === undefined) {
         this.handleCancel()
@@ -1631,9 +1611,9 @@ export class MenuSystem {
       }
 
       const gasChecker = new GasChecker(gasResponse['maxGasPrice'])
-      console.log(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
+      logger.print(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
 
-      const delayMinResponse = await prompts({
+      const delayMinResponse = await ask({
         type: 'number',
         name: 'delayMinSec',
         message: 'Мин. пауза между кошельками (сек):',
@@ -1645,15 +1625,14 @@ export class MenuSystem {
           if (value > 86400) return 'Максимум 86400 сек (24 ч)'
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!delayMinResponse || delayMinResponse['delayMinSec'] === undefined) {
         this.handleCancel()
         return
       }
 
-      const delayMaxResponse = await prompts({
+      const delayMaxResponse = await ask({
         type: 'number',
         name: 'delayMaxSec',
         message: 'Макс. пауза между кошельками (сек):',
@@ -1668,8 +1647,7 @@ export class MenuSystem {
           }
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!delayMaxResponse || delayMaxResponse['delayMaxSec'] === undefined) {
         this.handleCancel()
@@ -1679,24 +1657,24 @@ export class MenuSystem {
       const delayMinSec = Math.floor(delayMinResponse['delayMinSec'])
       const delayMaxSec = Math.floor(delayMaxResponse['delayMaxSec'])
       if (delayMinSec < 1 || delayMaxSec < delayMinSec) {
-        console.log('Некорректный диапазон паузы. Возврат в главное меню.')
+        logger.print('Некорректный диапазон паузы. Возврат в главное меню.')
         await this.showMainMenu()
         return
       }
-      console.log(`Пауза между кошельками: случайно от ${delayMinSec} до ${delayMaxSec} сек`)
+      logger.print(`Пауза между кошельками: случайно от ${delayMinSec} до ${delayMaxSec} сек`)
 
       const privateKeys = await this.getAllPrivateKeys()
       if (privateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         await this.showMainMenu()
         return
       }
 
       const shuffledKeys = this.shuffleArray(privateKeys)
       const opLabel = operation === 'deposit' ? 'ДЕПОЗИТ' : 'ВЫВОД'
-      console.log(`\n${opLabel} для ${shuffledKeys.length} кошельков`)
-      console.log('Для остановки нажмите Ctrl+C')
-      console.log('='.repeat(80))
+      logger.print(`\n${opLabel} для ${shuffledKeys.length} кошельков`)
+      logger.print('Для остановки нажмите Ctrl+C')
+      logger.print('='.repeat(80))
 
       let successCount = 0
       let skippedCount = 0
@@ -1710,12 +1688,12 @@ export class MenuSystem {
           const { privateKeyToAccount: pkToAccount } = await import('viem/accounts')
           const account = pkToAccount(privateKey)
 
-          console.log(`\n${batchLabel} ${i + 1}/${keys.length}:`)
-          console.log('-'.repeat(50))
-          console.log(`Адрес: ${account.address}`)
+          logger.print(`\n${batchLabel} ${i + 1}/${keys.length}:`)
+          logger.print('-'.repeat(50))
+          logger.print(`Адрес: ${account.address}`)
 
           try {
-            console.log('Проверяем цену газа...')
+            logger.print('Проверяем цену газа...')
             await gasChecker.waitForGasPriceToDrop()
 
             const result = operation === 'deposit'
@@ -1724,36 +1702,35 @@ export class MenuSystem {
 
             if (result.skipped) {
               skippedCount++
-              console.log(`Пропущен: ${result.reason}`)
+              logger.print(`Пропущен: ${result.reason}`)
             } else if (result.success) {
               successCount++
-              // Убираем из списка упавших если он там был (retry)
               const failedIdx = failedKeys.indexOf(privateKey)
               if (failedIdx !== -1) failedKeys.splice(failedIdx, 1)
               if (operation === 'deposit' && 'depositAmount' in result) {
-                console.log(`Депозит: ${result.depositAmount} ETH`)
+                logger.print(`Депозит: ${result.depositAmount} ETH`)
               } else if (operation === 'withdraw' && 'lpAmount' in result) {
-                console.log(`Выведено LP: ${result.lpAmount} S*ETH`)
+                logger.print(`Выведено LP: ${result.lpAmount} S*ETH`)
               }
               if (result.transactionHash) {
-                console.log(`TX: ${result.transactionHash}`)
-                console.log(`Explorer: ${result.explorerUrl}`)
+                logger.print(`TX: ${result.transactionHash}`)
+                logger.print(`Explorer: ${result.explorerUrl}`)
               }
             } else {
               errorCount++
-              console.log(`Ошибка: ${result.error}`)
+              logger.print(`Ошибка: ${result.error}`)
               if (!failedKeys.includes(privateKey)) failedKeys.push(privateKey)
             }
           } catch (error) {
             errorCount++
-            console.log(`Критическая ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
+            logger.print(`Критическая ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`)
             if (!failedKeys.includes(privateKey)) failedKeys.push(privateKey)
           }
 
           if (i < keys.length - 1) {
             const pauseSec = delayMinSec + Math.floor(Math.random() * (delayMaxSec - delayMinSec + 1))
-            console.log(`Пауза ${pauseSec} секунд...`)
-            await new Promise(resolve => setTimeout(resolve, pauseSec * 1000))
+            logger.print(`Пауза ${pauseSec} секунд...`)
+            await sleep(pauseSec * 1000)
           }
         }
       }
@@ -1761,56 +1738,54 @@ export class MenuSystem {
       await runBatch(shuffledKeys, 'КОШЕЛЕК')
 
       const totalTime = ((Date.now() - startTime) / 1000).toFixed(1)
-      console.log('\n' + '='.repeat(80))
-      console.log(`ИТОГО: Успешно: ${successCount} | Пропущено: ${skippedCount} | Ошибок: ${errorCount}`)
-      console.log(`Время выполнения: ${totalTime} сек`)
+      logger.print('\n' + '='.repeat(80))
+      logger.print(`ИТОГО: Успешно: ${successCount} | Пропущено: ${skippedCount} | Ошибок: ${errorCount}`)
+      logger.print(`Время выполнения: ${totalTime} сек`)
 
-      // Retry для упавших кошельков
       while (failedKeys.length > 0) {
-        console.log(`\n⚠️  Упали ${failedKeys.length} кошелек(ов). Повторить попытку?`)
-        const retryResponse = await prompts({
+        logger.print(`\n⚠️  Упали ${failedKeys.length} кошелек(ов). Повторить попытку?`)
+        const retryResponse = await ask({
           type: 'confirm',
           name: 'retry',
           message: `Запустить повтор для ${failedKeys.length} упавших кошельков?`,
           initial: true
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any)
+        })
 
         if (!retryResponse || !retryResponse['retry']) break
 
         const retryKeys = [...failedKeys]
         failedKeys.length = 0
         errorCount = 0
-        console.log(`\nПОВТОР для ${retryKeys.length} кошельков...`)
-        console.log('='.repeat(80))
+        logger.print(`\nПОВТОР для ${retryKeys.length} кошельков...`)
+        logger.print('='.repeat(80))
         await runBatch(retryKeys, 'ПОВТОР')
 
-        console.log('\n' + '='.repeat(80))
-        console.log(`После повтора — Успешно: ${successCount} | Пропущено: ${skippedCount} | Ошибок: ${failedKeys.length}`)
+        logger.print('\n' + '='.repeat(80))
+        logger.print(`После повтора — Успешно: ${successCount} | Пропущено: ${skippedCount} | Ошибок: ${failedKeys.length}`)
       }
 
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
 
     } catch (error) {
       logger.error('Ошибка в меню Stargate ETH', error)
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
     }
   }
 
   /**
-   * Показывает меню минта бейджа за 8 сезон
+   * Показывает меню минта бейджа
    */
   private async showSeasonBadgeMintMenu (): Promise<void> {
     try {
-      console.log(`\nМИНТ БЕЙДЖА ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН`)
-      console.log('='.repeat(80))
+      logger.print(`\nМИНТ БЕЙДЖА ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН`)
+      logger.print('='.repeat(80))
 
       // Запрос максимальной цены газа
-      const gasResponse = await prompts({
+      const gasResponse = await ask({
         type: 'number',
         name: 'maxGasPrice',
         message: 'Максимальная цена газа в ETH mainnet (Gwei):',
@@ -1823,8 +1798,7 @@ export class MenuSystem {
           if (value > 100) return 'Максимальное значение: 100 Gwei'
           return true
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!gasResponse || gasResponse['maxGasPrice'] === undefined) {
         this.handleCancel()
@@ -1832,24 +1806,23 @@ export class MenuSystem {
       }
 
       if (!gasResponse['maxGasPrice']) {
-        console.log('\nНеверное значение газа. Попробуйте снова.')
+        logger.print('\nНеверное значение газа. Попробуйте снова.')
         await this.showMainMenu()
         return
       }
 
       const gasChecker = new GasChecker(gasResponse['maxGasPrice'])
-      console.log(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
+      logger.print(`Лимит газа установлен: ${gasResponse['maxGasPrice']} Gwei`)
 
       // Запрос минимальной задержки
-      const minDelay = await prompts({
+      const minDelay = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите минимальную задержку между минтами (минуты):',
         initial: 2,
         min: 1,
         validate: (value: number) => value >= 1 ? true : 'Задержка должна быть не менее 1 минуты'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!minDelay || minDelay['value'] === undefined) {
         this.handleCancel()
@@ -1857,29 +1830,28 @@ export class MenuSystem {
       }
 
       // Запрос максимальной задержки
-      const maxDelay = await prompts({
+      const maxDelay = await ask({
         type: 'number',
         name: 'value',
         message: 'Введите максимальную задержку между минтами (минуты):',
         initial: 5,
         min: minDelay['value'],
         validate: (value: number) => value >= minDelay['value'] ? true : 'Максимальная задержка должна быть больше или равна минимальной'
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!maxDelay || maxDelay['value'] === undefined) {
         this.handleCancel()
         return
       }
 
-      console.log(`Задержки между минтами: ${minDelay['value']} - ${maxDelay['value']} минут`)
-      console.log('Задержка применяется только после успешного минта')
+      logger.print(`Задержки между минтами: ${minDelay['value']} - ${maxDelay['value']} минут`)
+      logger.print('Задержка применяется только после успешного минта')
 
       // Получаем все приватные ключи
       const privateKeys = await this.getAllPrivateKeys()
 
       if (privateKeys.length === 0) {
-        console.log('Не найдено приватных ключей')
+        logger.print('Не найдено приватных ключей')
         await this.showMainMenu()
         return
       }
@@ -1889,10 +1861,10 @@ export class MenuSystem {
         privateKey: key
       }))
 
-      console.log(`Найдено ${keysWithIndex.length} кошельков`)
-      console.log('Начинаем проверку и минт...')
-      console.log('Для остановки нажмите Ctrl+C')
-      console.log('='.repeat(80))
+      logger.print(`Найдено ${keysWithIndex.length} кошельков`)
+      logger.print('Начинаем проверку и минт...')
+      logger.print('Для остановки нажмите Ctrl+C')
+      logger.print('='.repeat(80))
 
       // Выполняем минт для каждого кошелька
       let successCount = 0
@@ -1906,12 +1878,12 @@ export class MenuSystem {
         const { originalIndex, privateKey } = keysWithIndex[i]!
         const account = privateKeyToAccount(privateKey)
 
-        console.log(`\nКОШЕЛЕК ${i + 1}/${keysWithIndex.length}:`)
-        console.log('-'.repeat(50))
-        console.log(`Адрес: ${account.address}`)
+        logger.print(`\nКОШЕЛЕК ${i + 1}/${keysWithIndex.length}:`)
+        logger.print('-'.repeat(50))
+        logger.print(`Адрес: ${account.address}`)
 
         try {
-          console.log('Проверяем цену газа...')
+          logger.print('Проверяем цену газа...')
           await gasChecker.waitForGasPriceToDrop()
 
           const result = await performSeasonBadgeMint(privateKey, BADGE_MINT_CONFIG)
@@ -1936,17 +1908,17 @@ export class MenuSystem {
                 mintStatus = 'skipped'
                 statusText = 'Skipped'
               }
-              console.log(`Пропущен: ${result.reason || 'Не указана причина'}`)
+              logger.print(`Пропущен: ${result.reason || 'Не указана причина'}`)
             } else {
               successCount++
               previousMintSuccessful = true // Устанавливаем флаг успешного минта
               mintStatus = 'minted'
               statusText = 'Minted'
-              console.log('Минт выполнен успешно!')
+              logger.print('Минт выполнен успешно!')
               if (result.transactionHash) {
-                console.log(`TX Hash: ${result.transactionHash}`)
+                logger.print(`TX Hash: ${result.transactionHash}`)
                 if (result.explorerUrl) {
-                  console.log(`Explorer: ${result.explorerUrl}`)
+                  logger.print(`Explorer: ${result.explorerUrl}`)
                 }
               }
             }
@@ -1954,7 +1926,7 @@ export class MenuSystem {
             errorCount++
             mintStatus = 'error'
             statusText = 'Ошибка'
-            console.log(`Ошибка: ${result.error || 'Неизвестная ошибка'}`)
+            logger.print(`Ошибка: ${result.error || 'Неизвестная ошибка'}`)
           }
 
           // Сохраняем результат для таблицы (используем оригинальный индекс из keys.txt)
@@ -1976,7 +1948,7 @@ export class MenuSystem {
           errorCount++
           previousMintSuccessful = false
           const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка'
-          console.log(`Критическая ошибка: ${errorMessage}`)
+          logger.print(`Критическая ошибка: ${errorMessage}`)
 
           // Сохраняем результат с ошибкой (используем оригинальный индекс из keys.txt)
           results.push({
@@ -1994,11 +1966,11 @@ export class MenuSystem {
           const delayMinutes = Math.random() * (maxDelay['value'] - minDelay['value']) + minDelay['value']
           const delayMs = delayMinutes * 60 * 1000
 
-          console.log(`Задержка ${delayMinutes.toFixed(2)} минут (${Math.round(delayMs / 1000)} секунд) до следующего кошелька...`)
-          await new Promise(resolve => setTimeout(resolve, delayMs))
+          logger.print(`Задержка ${delayMinutes.toFixed(2)} минут (${Math.round(delayMs / 1000)} секунд) до следующего кошелька...`)
+          await sleep(delayMs)
         } else if (i < keysWithIndex.length - 1) {
-          console.log('Пауза 3 секунды...')
-          await new Promise(resolve => setTimeout(resolve, 3000))
+          logger.print('Пауза 3 секунды...')
+          await sleep(3000)
         }
       }
 
@@ -2009,13 +1981,12 @@ export class MenuSystem {
       this.showSeasonBadgeMintTable(results)
 
       // Предложение экспорта в Excel
-      const exportResponse = await prompts({
+      const exportResponse = await ask({
         type: 'confirm',
         name: 'value',
         message: 'Экспортировать результаты минта в Excel файл?',
         initial: true
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+      })
 
       if (!exportResponse) {
         this.handleCancel()
@@ -2024,10 +1995,10 @@ export class MenuSystem {
 
       if (exportResponse['value']) {
         try {
-          console.log('\nСоздание Excel файла...')
+          logger.print('\nСоздание Excel файла...')
           const filePath = await this.exportSeasonBadgeMintToExcel(results)
-          console.log('\nРезультаты успешно экспортированы!')
-          console.log(`Путь к файлу: ${filePath}`)
+          logger.print('\nРезультаты успешно экспортированы!')
+          logger.print(`Путь к файлу: ${filePath}`)
         } catch (error) {
           logger.error('Ошибка при экспорте в Excel', error)
         }
@@ -2038,14 +2009,14 @@ export class MenuSystem {
       const totalTime = (endTime - startTime) / 1000
       this.showSeasonBadgeMintStatistics(successCount, skippedCount, errorCount, keysWithIndex.length, totalTime)
 
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
 
     } catch (error) {
       logger.error('Ошибка при минте бейджей', error)
-      console.log('\nВозврат в главное меню через 5 секунд...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
+      logger.print('\nВозврат в главное меню через 5 секунд...')
+      await sleep(5000)
       await this.showMainMenu()
     }
   }
@@ -2062,13 +2033,13 @@ export class MenuSystem {
     const headerSeason = seasonLabel.padEnd(seasonColInner - 1) // ' Season 9' структура: 1 пробел + label, padded
     const seasonDashes = '─'.repeat(seasonColInner)
 
-    console.log(`\nРЕЗУЛЬТАТЫ МИНТА БЕЙДЖЕЙ ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН`)
-    console.log('='.repeat(80))
+    logger.print(`\nРЕЗУЛЬТАТЫ МИНТА БЕЙДЖЕЙ ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН`)
+    logger.print('='.repeat(80))
 
     // Заголовок таблицы
-    console.log(`┌──────┬─────────────────────────────────────────────────────────┬${seasonDashes}┬──────────────────┐`)
-    console.log(`│   #  │ Wallet Address                                          │ ${headerSeason}│ Mint Status      │`)
-    console.log(`├──────┼─────────────────────────────────────────────────────────┼${seasonDashes}┼──────────────────┤`)
+    logger.print(`┌──────┬─────────────────────────────────────────────────────────┬${seasonDashes}┬──────────────────┐`)
+    logger.print(`│   #  │ Wallet Address                                          │ ${headerSeason}│ Mint Status      │`)
+    logger.print(`├──────┼─────────────────────────────────────────────────────────┼${seasonDashes}┼──────────────────┤`)
 
     // Данные таблицы
     results.forEach((result) => {
@@ -2098,10 +2069,10 @@ export class MenuSystem {
         status = `\x1b[31m${status}\x1b[0m` // Красный
       }
 
-      console.log(`│ ${walletNumber} │ ${address.padEnd(55)} │ ${points} │ ${status} │`)
+      logger.print(`│ ${walletNumber} │ ${address.padEnd(55)} │ ${points} │ ${status} │`)
     })
 
-    console.log(`└──────┴─────────────────────────────────────────────────────────┴${seasonDashes}┴──────────────────┘`)
+    logger.print(`└──────┴─────────────────────────────────────────────────────────┴${seasonDashes}┴──────────────────┘`)
   }
 
   /**
@@ -2238,19 +2209,19 @@ export class MenuSystem {
    * Показывает статистику выполнения минта бейджей
    */
   private showSeasonBadgeMintStatistics (successCount: number, skippedCount: number, errorCount: number, totalCount: number, totalTime: number): void {
-    console.log('\nФИНАЛЬНАЯ СТАТИСТИКА МИНТА БЕЙДЖЕЙ')
-    console.log('='.repeat(80))
-    console.log(`Всего кошельков: ${totalCount}`)
-    console.log(`Успешно заминчено: ${successCount}`)
-    console.log(`Пропущено: ${skippedCount}`)
-    console.log(`Ошибок: ${errorCount}`)
-    console.log(`Общее время: ${totalTime.toFixed(2)} секунд`)
+    logger.print('\nФИНАЛЬНАЯ СТАТИСТИКА МИНТА БЕЙДЖЕЙ')
+    logger.print('='.repeat(80))
+    logger.print(`Всего кошельков: ${totalCount}`)
+    logger.print(`Успешно заминчено: ${successCount}`)
+    logger.print(`Пропущено: ${skippedCount}`)
+    logger.print(`Ошибок: ${errorCount}`)
+    logger.print(`Общее время: ${totalTime.toFixed(2)} секунд`)
     if (totalCount > 0) {
-      console.log(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
+      logger.print(`Процент успеха: ${((successCount / totalCount) * 100).toFixed(1)}%`)
     }
-    console.log('='.repeat(80))
-    console.log(`МИНТ БЕЙДЖЕЙ ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН ЗАВЕРШЕН!`)
-    console.log('='.repeat(80))
+    logger.print('='.repeat(80))
+    logger.print(`МИНТ БЕЙДЖЕЙ ЗА ${BADGE_MINT_CONFIG.season} СЕЗОН ЗАВЕРШЕН!`)
+    logger.print('='.repeat(80))
   }
 
 }

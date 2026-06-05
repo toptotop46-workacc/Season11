@@ -1,29 +1,20 @@
 import { privateKeyToAccount } from 'viem/accounts'
 import { TransactionChecker } from './modules/transaction-checker.js'
 import { logger } from './logger.js'
+import { sleep } from './backoff.js'
+import { metrics } from './metrics.js'
 import { GasChecker } from './gas-checker.js'
 import { GM_IGNORE_POINTS_LIMIT } from './season-config.js'
 
 // Импорт всех модулей
-import { performLiquidityManagement as performAaveLiquidity } from './modules/aave.js'
 import { performArkadaCheckin } from './modules/arkada-checkin.js'
-import { performCollection } from './modules/collector.js'
 import { performLootcoinCheckin } from './modules/lootcoin.js'
 import { performJumperSwap } from './modules/jumper.js'
-import { performMorphoLiquidityManagement } from './modules/morpho.js'
-import { performSakeFinanceOperations } from './modules/sake-finance.js'
-import { performLiquidityManagement as performStargateLiquidity } from './modules/stargate.js'
-import { performDepositManagement } from './modules/untitled-bank.js'
 import { performRevoke } from './modules/revoke.js'
 import { performHarkan } from './modules/harkan.js'
 import { performVelodrome } from './modules/velodrome.js'
 import { performWowmax } from './modules/wowmax.js'
 import { performCaptainCheckin } from './modules/captain-checkin.js'
-import { performMmpQuest } from './modules/mmp-quest.js'
-import { performBurrowBash } from './modules/burrow-bash.js'
-import { performWorldOfTrinity } from './modules/world-of-trinity.js'
-import { performStartaleInvite } from './modules/startale-invite.js'
-import { performStartaleGm } from './modules/startale-gm.js'
 
 // Интерфейс для результата выполнения модуля
 interface ModuleResult {
@@ -39,30 +30,9 @@ interface ModuleResult {
   swapAmount?: string
   targetToken?: string
   usdcBalance?: string
-  aTokenBalance?: string
-  morphoBalance?: string
-  redeemableBalance?: string
-  bankBalance?: string
   streak?: number
   blockNumber?: bigint
-  // Поля для Sake Finance
-  initialUsdcBalance?: string
-  initialATokenBalance?: string
-  finalUsdcBalance?: string
-  finalATokenBalance?: string
-  withdrawTransactionHash?: string | null
-  supplyTransactionHash?: string | null
-  finalWithdrawTransactionHash?: string | null
-  depositAmount?: string
   message?: string
-  // Поля для других модулей
-  depositTransactionHash?: string
-  redeemTransactionHash?: string | null
-  withdrawTxHash?: string
-  // Поля для автоматической покупки USDC.e
-  usdcPurchased?: boolean
-  usdcPurchaseHash?: string | undefined
-  usdcPurchaseAmount?: string | undefined
   [key: string]: unknown
 }
 
@@ -126,11 +96,6 @@ export class ParallelExecutor {
   // Список всех доступных модулей
   private readonly modules: Module[] = [
     {
-      name: 'Aave',
-      description: 'Управление ликвидностью в протоколе Aave',
-      execute: performAaveLiquidity
-    },
-    {
       name: 'Arkada Check-in',
       description: 'Ежедневный check-in в Arkada',
       execute: performArkadaCheckin
@@ -141,34 +106,9 @@ export class ParallelExecutor {
       execute: performLootcoinCheckin
     },
     {
-      name: 'Collector',
-      description: 'Сбор токенов и проверка ликвидности во всех протоколах',
-      execute: performCollection
-    },
-    {
       name: 'Jumper',
       description: 'Свапы токенов через LI.FI',
       execute: performJumperSwap
-    },
-    {
-      name: 'Morpho',
-      description: 'Управление ликвидностью в протоколе Morpho',
-      execute: performMorphoLiquidityManagement
-    },
-    {
-      name: 'Sake Finance',
-      description: 'Операции в протоколе Sake Finance',
-      execute: performSakeFinanceOperations
-    },
-    {
-      name: 'Stargate',
-      description: 'Управление ликвидностью в протоколе Stargate',
-      execute: performStargateLiquidity
-    },
-    {
-      name: 'Untitled Bank',
-      description: 'Управление депозитами в Untitled Bank',
-      execute: performDepositManagement
     },
     {
       name: 'Revoke',
@@ -194,31 +134,6 @@ export class ParallelExecutor {
       name: 'Captain Check-in',
       description: 'Ежедневный check-in в Captain',
       execute: performCaptainCheckin
-    },
-    {
-      name: 'MMP Quest',
-      description: 'Morning Moon Pocket S10 quest — wild → craft → stake',
-      execute: performMmpQuest
-    },
-    {
-      name: 'Burrow Bash',
-      description: 'Burrow Bash: createGame для квеста "Play 10 games" (1 tx за вызов, проверка через portal)',
-      execute: performBurrowBash
-    },
-    {
-      name: 'World of Trinity',
-      description: 'World of Trinity: 1 battle через WS matchmaking + AutoLose (квест Join 3 games)',
-      execute: performWorldOfTrinity
-    },
-    {
-      name: 'Startale Invite',
-      description: 'Реферальный квест Startale (startale_10/quests[1]): SIWE auth main → invitee + referrer_code → portal polling',
-      execute: performStartaleInvite
-    },
-    {
-      name: 'Startale GM',
-      description: 'Ежедневный GM на Startale (startale_10/quests[0]): UserOp через Smart Account (ERC-7579 Nexus) с Startale paymaster',
-      execute: performStartaleGm
     }
   ]
 
@@ -481,13 +396,13 @@ export class ParallelExecutor {
 
           await this.executeIteration(threadCount)
 
-          await new Promise(resolve => setTimeout(resolve, 5000))
+          await sleep(5000)
 
           this.iteration++
 
         } catch (error) {
           logger.error(`Ошибка в итерации #${this.iteration}`, error)
-          await new Promise(resolve => setTimeout(resolve, 1000))
+          await sleep(1000)
           this.iteration++
         }
       }
@@ -583,7 +498,7 @@ export class ParallelExecutor {
 
       // Специальная обработка для Jumper модуля (rate limit protection)
       if (module.name === 'Jumper') {
-        await new Promise(resolve => setTimeout(resolve, 2000)) // 2 секунды задержки
+        await sleep(2000) // 2 секунды задержки
       }
 
       // Выполняем модуль
@@ -600,6 +515,11 @@ export class ParallelExecutor {
       const isSkipped = result.skipped === true
       const isSuccess = result.success || isSkipped
 
+      metrics.moduleRun(module.name, account.address, isSuccess, endTime - startTime, {
+        txHash: result.transactionHash,
+        error: isSkipped ? undefined : result.error
+      })
+
       return {
         threadId,
         success: isSuccess,
@@ -614,6 +534,10 @@ export class ParallelExecutor {
     } catch (error) {
       const endTime = Date.now()
       const executionTime = (endTime - startTime) / 1000
+
+      metrics.moduleRun('unknown', 'unknown', false, endTime - startTime, {
+        error: error instanceof Error ? error.message : 'Неизвестная ошибка'
+      })
 
       return {
         threadId,
@@ -723,7 +647,7 @@ export class ParallelExecutor {
       })
 
       if (i + maxConcurrent < tasks.length) {
-        await new Promise(resolve => setTimeout(resolve, 2000))
+        await sleep(2000)
       }
     }
 
@@ -743,7 +667,7 @@ export class ParallelExecutor {
     try {
       // Специальная обработка для Jumper модуля (rate limit protection)
       if (task.assignedModule.name === 'Jumper') {
-        await new Promise(resolve => setTimeout(resolve, 2000)) // 2 секунды задержки
+        await sleep(2000) // 2 секунды задержки
       }
 
       // Выполняем модуль
@@ -902,6 +826,7 @@ export class ParallelExecutor {
     const modulesUsed = threadResults.map(r => r.moduleName)
     logger.iterationStart(modulesUsed)
     logger.iterationResult(successCount, errorCount, totalTime)
+    metrics.iteration(errorCount === 0, totalTime * 1000, { successCount, errorCount })
 
     threadResults.forEach(result => {
       logger.threadResult(

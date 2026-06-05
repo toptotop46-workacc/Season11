@@ -1,4 +1,6 @@
 import { createPublicClient, createWalletClient, http, type Chain, type Account, type PublicClient, type WalletClient } from 'viem'
+import { config } from './config.js'
+import { backoffDelay, sleep } from './backoff.js'
 
 /**
  * Опции для одноразового public client (используется в simulate-обёртках с AbortSignal).
@@ -22,13 +24,7 @@ export class RpcManager {
   private currentIndex: number = 0
 
   constructor () {
-    // Основной RPC и fallback RPC провайдеры
-    this.rpcUrls = [
-      'https://soneium-rpc.publicnode.com', // Основной
-      'https://1868.rpc.thirdweb.com', // Fallback 1
-      'https://soneium.drpc.org', // Fallback 2
-      'https://soneium.rpc.hypersync.xyz' // Fallback 3
-    ]
+    this.rpcUrls = config.rpcUrls
   }
 
   /**
@@ -70,9 +66,9 @@ export class RpcManager {
     return createPublicClient({
       chain,
       transport: http(this.getCurrentRpc(), {
-        timeout: 10000,
-        retryCount: 3,
-        retryDelay: 1000
+        timeout: config.rpcTimeout,
+        retryCount: config.rpcRetryCount,
+        retryDelay: config.rpcRetryDelay
       })
     })
   }
@@ -110,9 +106,9 @@ export class RpcManager {
       account,
       chain,
       transport: http(this.getCurrentRpc(), {
-        timeout: 10000,
-        retryCount: 3,
-        retryDelay: 1000
+        timeout: config.rpcTimeout,
+        retryCount: config.rpcRetryCount,
+        retryDelay: config.rpcRetryDelay
       })
     })
   }
@@ -140,8 +136,7 @@ export class RpcManager {
           break // Все RPC исчерпаны
         }
 
-        // Небольшая задержка перед следующей попыткой
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        await sleep(backoffDelay(attempt))
       }
     }
 
