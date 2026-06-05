@@ -18,6 +18,7 @@ import { performWowmax } from './modules/wowmax.js'
 import { performCaptainCheckin } from './modules/captain-checkin.js'
 import { performDiceOrDieCheckin } from './modules/diceordie-checkin.js'
 import { performPocketKnightsCheckin } from './modules/pocketknights-checkin.js'
+import { performAwakeningGuardians } from './modules/awakening-guardians.js'
 
 // Интерфейс для результата выполнения модуля
 interface ModuleResult {
@@ -150,6 +151,11 @@ export class ParallelExecutor {
       name: 'Pocket Knights Check-in',
       description: 'Ежедневный check-in в Pocket Knights',
       execute: performPocketKnightsCheckin
+    },
+    {
+      name: 'Awakening of Guardians',
+      description: 'Покупка X2 Gold Reward (бонусный квест, лимит 5/5)',
+      execute: performAwakeningGuardians
     }
   ]
 
