@@ -74,6 +74,8 @@ export class TransactionChecker {
   async checkWallets (wallets: string[]): Promise<{
     activeWallets: string[]
     completedWallets: string[]
+    /** Адреса отсортированные по score (от меньшего к большему) с их score */
+    walletScores: Array<{ address: string, score: number, status: 'done' | 'not_done' | 'error' }>
   }> {
     // Выполняем все проверки параллельно
     const checkPromises = wallets.map(async (wallet) => {
@@ -94,12 +96,15 @@ export class TransactionChecker {
 
     const activeWallets: string[] = []
     const completedWallets: string[] = []
+    const walletScores: Array<{ address: string, score: number, status: 'done' | 'not_done' | 'error' }> = []
 
     for (const { wallet, result, error } of results) {
       if (error) {
         activeWallets.push(wallet)
+        walletScores.push({ address: wallet, score: 0, status: 'error' })
         logger.error(`${wallet}: критическая ошибка - ${error}`)
       } else if (result) {
+        walletScores.push({ address: wallet, score: result.pointsCount ?? 0, status: result.status })
         if (result.status === 'done') {
           completedWallets.push(wallet)
         } else if (result.status === 'not_done') {
@@ -111,9 +116,12 @@ export class TransactionChecker {
       }
     }
 
+    // Сортируем по score (отстающие первыми)
+    walletScores.sort((a, b) => a.score - b.score)
+
     logger.info(`Проверка завершена: активных ${activeWallets.length}, завершенных ${completedWallets.length}`)
 
-    return { activeWallets, completedWallets }
+    return { activeWallets, completedWallets, walletScores }
   }
 
   // Проверка одного кошелька

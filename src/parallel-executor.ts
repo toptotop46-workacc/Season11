@@ -74,8 +74,11 @@ export class ParallelExecutor {
   // Список кошельков для текущей итерации (isCompleted=true → только GM модуль)
   private currentIterationWallets: { privateKey: `0x${string}`, address: string, isCompleted: boolean }[] = []
 
-  // Отслеживание ежедневных транзакций для streak
-  private lastTransactionDates: Map<string, string> = new Map() // address -> date string (YYYY-MM-DD)
+  // Отслеживание ежедневных транзакций: address -> { date, count }
+  private dailyTxTracker: Map<string, { date: string, count: number }> = new Map()
+
+  /** Максимум транзакций на кошелёк в день. Выполнившие норму уступают поток отстающим. */
+  private readonly MAX_TX_PER_WALLET_PER_DAY = 15
 
   // Кэш для приватных ключей - чтобы не запрашивать пароль каждый раз
   private cachedPrivateKeys: `0x${string}`[] | null = null
@@ -201,20 +204,40 @@ export class ParallelExecutor {
   }
 
   /**
-   * Проверяет, делал ли кошелек транзакцию сегодня
+   * Возвращает количество транзакций кошелька за сегодня
    */
-  private hasTransactedToday (address: string): boolean {
-    const lastDate = this.lastTransactionDates.get(address)
+  private getTodayTxCount (address: string): number {
+    const entry = this.dailyTxTracker.get(address)
     const today = new Date().toISOString().split('T')[0]!
-    return lastDate === today
+    if (!entry || entry.date !== today) return 0
+    return entry.count
   }
 
   /**
-   * Отмечает, что кошелек сделал транзакцию сегодня
+   * Проверяет, делал ли кошелек транзакцию сегодня
+   */
+  private hasTransactedToday (address: string): boolean {
+    return this.getTodayTxCount(address) > 0
+  }
+
+  /**
+   * Проверяет, достиг ли кошелёк дневного лимита транзакций
+   */
+  private hasReachedDailyCap (address: string): boolean {
+    return this.getTodayTxCount(address) >= this.MAX_TX_PER_WALLET_PER_DAY
+  }
+
+  /**
+   * Отмечает, что кошелек сделал транзакцию сегодня (инкремент счётчика)
    */
   private markTransactionToday (address: string): void {
     const today = new Date().toISOString().split('T')[0]!
-    this.lastTransactionDates.set(address, today)
+    const entry = this.dailyTxTracker.get(address)
+    if (!entry || entry.date !== today) {
+      this.dailyTxTracker.set(address, { date: today, count: 1 })
+    } else {
+      entry.count++
+    }
   }
 
   /**
@@ -260,17 +283,16 @@ export class ParallelExecutor {
         return
       }
 
-      // Автоматический выбор кошельков
+      // Автоматический выбор кошельков с приоритетом отстающих
       const allPrivateKeys = await this.getAllPrivateKeys()
       const allAddresses = allPrivateKeys.map(pk => privateKeyToAccount(pk).address)
-
-      // Перемешиваем все кошельки для случайного выбора
-      const shuffled = [...allAddresses].sort(() => Math.random() - 0.5)
 
       // Проверяем кошельки батчами до нахождения нужного количества
       const batchSize = threadCount * this.WALLET_SELECTION_CONFIG.batchSizeMultiplier
       const allActiveWallets: string[] = []
       const allCompletedWallets: string[] = []
+      // Кэш score для сортировки по приоритету (отстающие первыми)
+      const scoreMap = new Map<string, number>()
       let checkedCount = 0
       let attempt = 0
 
@@ -282,21 +304,24 @@ export class ParallelExecutor {
           ? (allActiveWallets.length + allCompletedWallets.length) < threadCount
           : allActiveWallets.length < threadCount) &&
         attempt < this.WALLET_SELECTION_CONFIG.maxCheckAttempts &&
-        checkedCount < shuffled.length
+        checkedCount < allAddresses.length
       ) {
         attempt++
         const startIndex = checkedCount
-        const endIndex = Math.min(startIndex + batchSize, shuffled.length)
-        const walletsToCheck = shuffled.slice(startIndex, endIndex)
+        const endIndex = Math.min(startIndex + batchSize, allAddresses.length)
+        const walletsToCheck = allAddresses.slice(startIndex, endIndex)
 
         if (walletsToCheck.length === 0) {
           break
         }
 
-        const { activeWallets, completedWallets } = await this.transactionChecker!.checkWallets(walletsToCheck)
+        const { activeWallets, completedWallets, walletScores } = await this.transactionChecker!.checkWallets(walletsToCheck)
 
         allActiveWallets.push(...activeWallets)
         allCompletedWallets.push(...completedWallets)
+        for (const ws of walletScores) {
+          scoreMap.set(ws.address, ws.score)
+        }
         checkedCount += walletsToCheck.length
       }
 
@@ -305,16 +330,14 @@ export class ParallelExecutor {
       const candidateWallets: WalletEntry[] = []
 
       // Добавляем active-кошельки
-      const shuffledActive = [...allActiveWallets].sort(() => Math.random() - 0.5)
-      for (const addr of shuffledActive) {
+      for (const addr of allActiveWallets) {
         const pk = allPrivateKeys.find(k => privateKeyToAccount(k).address === addr)!
         candidateWallets.push({ privateKey: pk, address: addr, isCompleted: false })
       }
 
       // Добавляем completed-кошельки если GM_IGNORE_POINTS_LIMIT=true
       if (GM_IGNORE_POINTS_LIMIT && allCompletedWallets.length > 0) {
-        const shuffledCompleted = [...allCompletedWallets].sort(() => Math.random() - 0.5)
-        for (const addr of shuffledCompleted) {
+        for (const addr of allCompletedWallets) {
           const pk = allPrivateKeys.find(k => privateKeyToAccount(k).address === addr)!
           candidateWallets.push({ privateKey: pk, address: addr, isCompleted: true })
         }
@@ -325,24 +348,24 @@ export class ParallelExecutor {
         return
       }
 
-      const actualThreadCount = Math.min(threadCount, candidateWallets.length)
+      // Фильтруем кошельки, достигшие дневного лимита транзакций
+      const underCap = candidateWallets.filter(w => !this.hasReachedDailyCap(w.address))
+      const pool = underCap.length > 0 ? underCap : candidateWallets // fallback если все на лимите
 
-      // Приоритет кошелькам без транзакций сегодня
-      const walletsNeedingStreak = this.getWalletsNeedingStreakToday(candidateWallets)
+      // Сортировка по приоритету:
+      // 1) Без транзакции сегодня (streak) — первыми
+      // 2) По score — отстающие (меньший score) первыми
+      pool.sort((a, b) => {
+        const aToday = this.hasTransactedToday(a.address) ? 1 : 0
+        const bToday = this.hasTransactedToday(b.address) ? 1 : 0
+        if (aToday !== bToday) return aToday - bToday // без транзакции сегодня → выше
+        const aScore = scoreMap.get(a.address) ?? 0
+        const bScore = scoreMap.get(b.address) ?? 0
+        return aScore - bScore // меньший score → выше приоритет
+      })
 
-      if (walletsNeedingStreak.length > 0) {
-        const priorityCount = Math.min(actualThreadCount, walletsNeedingStreak.length)
-        this.currentIterationWallets = walletsNeedingStreak.slice(0, priorityCount)
-
-        if (priorityCount < actualThreadCount) {
-          const remaining = candidateWallets
-            .filter(w => !walletsNeedingStreak.includes(w))
-            .slice(0, actualThreadCount - priorityCount)
-          this.currentIterationWallets.push(...remaining)
-        }
-      } else {
-        this.currentIterationWallets = candidateWallets.slice(0, actualThreadCount)
-      }
+      const actualThreadCount = Math.min(threadCount, pool.length)
+      this.currentIterationWallets = pool.slice(0, actualThreadCount)
 
     } catch (error) {
       logger.error('Ошибка при выборе кошельков для итерации', error)
