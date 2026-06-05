@@ -49,7 +49,10 @@ export const config = {
   statsApiTimeout: envInt('STATS_API_TIMEOUT_MS', 10000),
 
   /** How many times to retry a failed stats API call */
-  statsApiRetryAttempts: envInt('STATS_API_RETRY_ATTEMPTS', 10),
+  statsApiRetryAttempts: envInt('STATS_API_RETRY_ATTEMPTS', 5),
+
+  /** Max concurrent wallet fetches for statistics */
+  statsConcurrency: envInt('STATS_CONCURRENCY', 15),
 
   /** Block explorer base URL */
   explorerUrl: envString('EXPLORER_URL', 'https://soneium.blockscout.com')

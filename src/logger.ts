@@ -72,7 +72,7 @@ export class Logger {
 
   success (message: string): void {
     if (this.level >= LogLevel.INFO) {
-      console.log(this.fmt('INFO', message, GREEN))
+      console.log(this.fmt('OK', message, GREEN))
     }
   }
 
