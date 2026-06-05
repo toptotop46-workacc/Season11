@@ -47,7 +47,7 @@ export const CONTRACTS = {
   arkadaCheckin: '0x98826e728977B25279ad7629134FD0e96bd5A7b2',
   diceOrDieCheckin: '0x17c7E99c2c1aEFdf3811F72ce960a0d560F039B4',
   pocketKnightsCheckin: '0x3F50Ba759b0e8BF4Fc78E79b36dfcC015Cb11DAa',
-  awakeningGuardiansPayment: '0xd2069fde',
+  awakeningGuardiansPayment: '0xd2069fde8bc04c95ba91fd87adf116ef1f02c2ce',
 
   // Stargate (bridge ETH)
   stargatePoolNative: '0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590',
