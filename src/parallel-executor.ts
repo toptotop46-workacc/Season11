@@ -287,6 +287,10 @@ export class ParallelExecutor {
       const allPrivateKeys = await this.getAllPrivateKeys()
       const allAddresses = allPrivateKeys.map(pk => privateKeyToAccount(pk).address)
 
+      // Перемешиваем адреса чтобы каждую итерацию проверялись разные кошельки
+      // (batch-checking выходит рано — без shuffle хвост массива никогда не проверится)
+      const shuffled = this.shuffleArray(allAddresses)
+
       // Проверяем кошельки батчами до нахождения нужного количества
       const batchSize = threadCount * this.WALLET_SELECTION_CONFIG.batchSizeMultiplier
       const allActiveWallets: string[] = []
@@ -304,12 +308,12 @@ export class ParallelExecutor {
           ? (allActiveWallets.length + allCompletedWallets.length) < threadCount
           : allActiveWallets.length < threadCount) &&
         attempt < this.WALLET_SELECTION_CONFIG.maxCheckAttempts &&
-        checkedCount < allAddresses.length
+        checkedCount < shuffled.length
       ) {
         attempt++
         const startIndex = checkedCount
-        const endIndex = Math.min(startIndex + batchSize, allAddresses.length)
-        const walletsToCheck = allAddresses.slice(startIndex, endIndex)
+        const endIndex = Math.min(startIndex + batchSize, shuffled.length)
+        const walletsToCheck = shuffled.slice(startIndex, endIndex)
 
         if (walletsToCheck.length === 0) {
           break
