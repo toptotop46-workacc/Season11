@@ -16,17 +16,37 @@ import { CURRENT_SEASON, POINTS_LIMIT_SEASON, BADGE_MINT_CONFIG } from './season
 import { shutdownManager } from './shutdown.js'
 import { config } from './config.js'
 import { backoffDelay, sleep } from './backoff.js'
+import { Semaphore } from './semaphore.js'
 
-/** Конфиг бонусных заданий текущего сезона (season 11) */
-const BONUS_QUEST_COLUMNS: Array<{ dappId: string, columns: Array<{ key: string, header: string }> }> = [
-]
-
-/** Плоский список всех бонусных колонок для таблицы и Excel */
-const BONUS_QUEST_COLUMNS_FLAT = BONUS_QUEST_COLUMNS.flatMap(d => d.columns)
+/**
+ * Бонусные задания текущего сезона — авто-заполняется из первого ответа API.
+ * Пустой массив пока не получены данные; заполняется в discoverBonusColumns().
+ */
+let BONUS_QUEST_COLUMNS: Array<{ dappId: string, columns: Array<{ key: string, header: string }> }> = []
+let BONUS_QUEST_COLUMNS_FLAT: Array<{ key: string, header: string }> = []
 
 /** Дефолтное значение bonusQuests (все N/A) */
 function getDefaultBonusQuests (): Record<string, string> {
   return Object.fromEntries(BONUS_QUEST_COLUMNS_FLAT.map(c => [c.key, 'N/A']))
+}
+
+/**
+ * Авто-обнаружение бонусных колонок из первого ответа bonus-dapp API.
+ * Вызывается один раз при получении первых данных.
+ */
+function discoverBonusColumns (bonusData: BonusDappQuest[]): void {
+  if (BONUS_QUEST_COLUMNS.length > 0) return // уже обнаружены
+  const seasonQuests = bonusData.filter(q => q.season === CURRENT_SEASON)
+  if (seasonQuests.length === 0) return
+
+  BONUS_QUEST_COLUMNS = seasonQuests.map(dapp => ({
+    dappId: dapp.id,
+    columns: dapp.quests.map((quest, i) => ({
+      key: `${dapp.id}_q${i}`,
+      header: quest.description || `${dapp.name} #${i + 1}`
+    }))
+  }))
+  BONUS_QUEST_COLUMNS_FLAT = BONUS_QUEST_COLUMNS.flatMap(d => d.columns)
 }
 
 // Интерфейсы для типизации данных статистики
@@ -1105,94 +1125,105 @@ export class MenuSystem {
         process.stdout.write(`\rПроверка кошельков: [${completedCount}/${totalCount}] ${percentage}%`)
       }
 
-      // Обрабатываем кошельки батчами для избежания рейт-лимита
-      const BATCH_SIZE = 50 // Размер батча
-      const BATCH_DELAY = 100 // Задержка между батчами в мс
-      const results: WalletStatisticsResult[] = []
+      // Семафор для ограничения конкурентности (адаптивный)
+      const INITIAL_CONCURRENCY = config.statsConcurrency
+      const sem = new Semaphore(INITIAL_CONCURRENCY)
+      let consecutiveErrors = 0
+      const MAX_CONSECUTIVE_ERRORS = 5 // Circuit breaker порог
 
-      for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
-        const batch = addresses.slice(i, i + BATCH_SIZE)
+      const fetchWallet = async (address: string, originalIndex: number): Promise<WalletStatisticsResult> => {
+        return sem.run(async () => {
+          // Circuit breaker: пауза при серии ошибок
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            const pauseMs = 15_000
+            logger.warn(`Circuit breaker: ${consecutiveErrors} ошибок подряд, пауза ${pauseMs / 1000}с`)
+            await sleep(pauseMs)
+            consecutiveErrors = 0
+            sem.setLimit(Math.max(3, Math.floor(sem.limit / 2)))
+          }
 
-        // Обрабатываем батч параллельно
-        const batchResults = await Promise.all(
-          batch.map(async (address, batchIndex) => {
-            const originalIndex = i + batchIndex // Исходный индекс кошелька в массиве addresses
-            try {
-              // Параллельно получаем данные из обоих API
-              const [walletData, bonusData] = await Promise.all([
-                this.fetchWalletDataWithRetry(address),
-                this.fetchBonusDappDataWithRetry(address)
-              ])
+          try {
+            const [walletData, bonusData] = await Promise.all([
+              this.fetchWalletDataWithRetry(address),
+              this.fetchBonusDappDataWithRetry(address)
+            ])
 
-              // Обработка данных о поинтах (текущий сезон)
-              let seasonScore = 0
-              let status: 'done' | 'not_done' | 'error' = 'error'
+            let seasonScore = 0
+            let status: 'done' | 'not_done' | 'error' = 'error'
 
-              if (!Array.isArray(walletData) && walletData.error) {
-                completedCount++
-                updateProgress()
-                return {
-                  address,
-                  success: false,
-                  status: 'error' as const,
-                  error: walletData.error,
-                  seasonScore: 0,
-                  bonusQuests: getDefaultBonusQuests(),
-                  originalIndex
-                }
-              }
-
-              if (Array.isArray(walletData) && walletData.length > 0) {
-                const seasonDataItem = walletData.find((item: SeasonData) => item.season === CURRENT_SEASON)
-                seasonScore = seasonDataItem ? this.parseScore(seasonDataItem.totalScore) : 0
-                status = seasonScore >= this.STATS_CONFIG.pointsLimit ? 'done' : 'not_done'
-              } else {
-                status = 'not_done'
-              }
-
-              let bonusQuests: Record<string, string> = getDefaultBonusQuests()
-
-              if (Array.isArray(bonusData) && bonusData.length > 0) {
-                bonusQuests = this.parseBonusQuests(bonusData)
-              } else if (!Array.isArray(bonusData) && bonusData.error) {
-                // Ошибка при получении bonus-dapp данных, оставляем N/A
-              }
-
-              completedCount++
-              updateProgress()
-
-              return {
-                address,
-                success: true,
-                status,
-                seasonScore,
-                bonusQuests,
-                pointsCount: seasonScore,
-                originalIndex
-              }
-            } catch (error) {
+            if (!Array.isArray(walletData) && walletData.error) {
+              consecutiveErrors++
               completedCount++
               updateProgress()
               return {
                 address,
                 success: false,
                 status: 'error' as const,
-                error: error instanceof Error ? error.message : 'Неизвестная ошибка',
+                error: walletData.error,
                 seasonScore: 0,
                 bonusQuests: getDefaultBonusQuests(),
                 originalIndex
               }
             }
-          })
-        )
 
-        results.push(...batchResults)
+            if (Array.isArray(walletData) && walletData.length > 0) {
+              const seasonDataItem = walletData.find((item: SeasonData) => item.season === CURRENT_SEASON)
+              seasonScore = seasonDataItem ? this.parseScore(seasonDataItem.totalScore) : 0
+              status = seasonScore >= this.STATS_CONFIG.pointsLimit ? 'done' : 'not_done'
+            } else {
+              status = 'not_done'
+            }
 
-        // Задержка между батчами (кроме последнего)
-        if (i + BATCH_SIZE < addresses.length) {
-          await sleep(BATCH_DELAY)
-        }
+            // Авто-обнаружение бонусных колонок из первого ответа
+            if (Array.isArray(bonusData) && bonusData.length > 0) {
+              discoverBonusColumns(bonusData)
+            }
+
+            let bonusQuests: Record<string, string> = getDefaultBonusQuests()
+
+            if (Array.isArray(bonusData) && bonusData.length > 0) {
+              bonusQuests = this.parseBonusQuests(bonusData)
+            }
+
+            consecutiveErrors = 0 // Сброс при успехе
+            // Плавно поднимаем конкурентность обратно при успехах
+            if (sem.limit < INITIAL_CONCURRENCY) {
+              sem.setLimit(Math.min(sem.limit + 1, INITIAL_CONCURRENCY))
+            }
+
+            completedCount++
+            updateProgress()
+
+            return {
+              address,
+              success: true,
+              status,
+              seasonScore,
+              bonusQuests,
+              pointsCount: seasonScore,
+              originalIndex
+            }
+          } catch (error) {
+            consecutiveErrors++
+            completedCount++
+            updateProgress()
+            return {
+              address,
+              success: false,
+              status: 'error' as const,
+              error: error instanceof Error ? error.message : 'Неизвестная ошибка',
+              seasonScore: 0,
+              bonusQuests: getDefaultBonusQuests(),
+              originalIndex
+            }
+          }
+        })
       }
+
+      // Все кошельки запускаются через семафор — конкурентность регулируется автоматически
+      const results = await Promise.all(
+        addresses.map((address, i) => fetchWallet(address, i))
+      )
 
       // Завершаем прогресс-бар
       logger.print('\n')
