@@ -41,9 +41,9 @@ function discoverBonusColumns (bonusData: BonusDappQuest[]): void {
 
   BONUS_QUEST_COLUMNS = seasonQuests.map(dapp => ({
     dappId: dapp.id,
-    columns: dapp.quests.map((quest, i) => ({
+    columns: dapp.quests.map((_quest, i) => ({
       key: `${dapp.id}_q${i}`,
-      header: quest.description || `${dapp.name} #${i + 1}`
+      header: dapp.quests.length === 1 ? dapp.name : `${dapp.name} #${i + 1}`
     }))
   }))
   BONUS_QUEST_COLUMNS_FLAT = BONUS_QUEST_COLUMNS.flatMap(d => d.columns)
