@@ -12,6 +12,7 @@ import { performHarkan } from './modules/harkan.js'
 import { performVelodrome } from './modules/velodrome.js'
 import { performWowmax } from './modules/wowmax.js'
 import { performCaptainCheckin } from './modules/captain-checkin.js'
+import { performDiceOrDieCheckin } from './modules/diceordie-checkin.js'
 
 // Интерфейс для результата выполнения модуля
 interface ModuleResult {
@@ -80,6 +81,11 @@ const modules: Record<string, Module> = {
     name: 'Captain Check-in',
     description: 'Ежедневный check-in в Captain',
     execute: performCaptainCheckin
+  },
+  'diceordie-checkin': {
+    name: 'Dice or Die Check-in',
+    description: 'Ежедневный check-in в Dice or Die',
+    execute: performDiceOrDieCheckin
   }
 }
 

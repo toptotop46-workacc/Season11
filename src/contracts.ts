@@ -45,6 +45,7 @@ export const CONTRACTS = {
   harkan: '0x983B499181A1B376CEE9Ffe18984cF62A767f745',
   captainCheckin: '0xedCbF9D4CC3BA9aAA896adADeac1b6DF6326f7D8',
   arkadaCheckin: '0x98826e728977B25279ad7629134FD0e96bd5A7b2',
+  diceOrDieCheckin: '0x17c7E99c2c1aEFdf3811F72ce960a0d560F039B4',
 
   // Stargate (bridge ETH)
   stargatePoolNative: '0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590',
