@@ -1,0 +1,9 @@
+# MEXC API Configuration
+# Замените на ваши реальные API ключи от MEXC
+
+apiKey=апи_ключ
+secretKey=секретный_ключ
+
+# Дополнительные настройки (опционально)
+# timeout=30000
+# recvWindow=5000

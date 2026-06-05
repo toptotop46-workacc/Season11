@@ -1,0 +1,61 @@
+import type { SeasonBadgeMintConfig } from './modules/season-badge-mint.js'
+
+/**
+ * Единая конфигурация текущего сезона.
+ * Смена сезона и порога завершённости — в одном месте.
+ */
+export const CURRENT_SEASON = 10
+/** Порог поинтов для статуса «завершён» (>= включительно). */
+export const POINTS_LIMIT_SEASON = 81
+
+/**
+ * Если `true`, completed-кошельки (`seasonScore >= POINTS_LIMIT_SEASON`)
+ * НЕ исключаются из работы parallel-executor: они продолжают попадать в
+ * итерацию, но для них принудительно запускается ТОЛЬКО `Startale GM`
+ * модуль (на остальные модули газ не тратится).
+ *
+ * Активные кошельки (`seasonScore < POINTS_LIMIT_SEASON`) — обычная
+ * ротация модулей, как и раньше.
+ *
+ * Защита от дабл-GM в один UTC-день обеспечивается on-chain:
+ * `DailyCheckIn.hasCheckedInToday(SA)` внутри `performStartaleGm`.
+ *
+ * Сценарий использования: после того как все кошельки набрали 81+ поинтов
+ * на сезон, мы хотим продолжать собирать ежедневные GM-поинты на платформе
+ * Startale, не тратя газ на бесполезные Aave/Morpho/MMP действия.
+ *
+ * Если `false` — старое поведение: completed-кошельки полностью
+ * исключаются из работы.
+ */
+export const GM_IGNORE_POINTS_LIMIT = false
+
+/** Минимальный процент от баланса ETH для свапа в USDC.e (через Jumper). Дробные значения допустимы, например 0.1 = 0.1%, 1 = 1%, 15 = 15%. */
+export const LIQUIDITY_SWAP_PERCENT_MIN = 1.1
+/** Максимальный процент от баланса ETH для свапа в USDC.e (через Jumper). Дробные значения допустимы. */
+export const LIQUIDITY_SWAP_PERCENT_MAX = 5.1
+
+/** Симулировать транзакцию перед отправкой (eth_call / simulateContract). Отключить при глючном RPC. */
+export const SIMULATE_BEFORE_SEND = true
+
+/** Строгая симуляция: блокировать транзакции при ошибке симуляции. false = только предупреждение. */
+export const STRICT_SIMULATION = true
+
+/**
+ * Конфигурация активного минта SBT-бейджа предыдущего сезона.
+ *
+ * При наступлении нового сезона достаточно обновить только этот блок:
+ * - `season` — номер сезона (UI таблицы, Excel и логов берётся отсюда)
+ * - `nftContract` — адрес ERC721-контракта бейджа
+ * - `mintPhase1Date` — старт Stage 1 (для 84+ поинтов)
+ * - `mintPhase2Date` — старт Stage 2 (для threshold..83 поинтов)
+ * - `threshold` — минимальный score для eligibility (по умолчанию 80)
+ * - `txLabel` — метка для логов транзакций
+ */
+export const BADGE_MINT_CONFIG: SeasonBadgeMintConfig = {
+  season: 9,
+  nftContract: '0x822ce419cc3298e58B8D61e64981634bBC54338c',
+  mintPhase1Date: new Date('2026-05-13T10:00:00+03:00'), // Stage 1 для 84+
+  mintPhase2Date: new Date('2026-05-27T10:00:00+03:00'), // Stage 2 для 80-83
+  threshold: 80,
+  txLabel: 'SEASON9_BADGE_MINT'
+}
