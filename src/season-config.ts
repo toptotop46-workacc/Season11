@@ -41,10 +41,10 @@ export const STRICT_SIMULATION = true
  * - `txLabel` — метка для логов транзакций
  */
 export const BADGE_MINT_CONFIG: SeasonBadgeMintConfig = {
-  season: 9,
-  nftContract: '0x822ce419cc3298e58B8D61e64981634bBC54338c',
-  mintPhase1Date: new Date('2026-05-13T10:00:00+03:00'), // Stage 1 для 84+
-  mintPhase2Date: new Date('2026-05-27T10:00:00+03:00'), // Stage 2 для 80-83
+  season: 10,
+  nftContract: '0x28DDd4926D0A40c8AFE191e3748FEbcF03e842Fa',
+  mintPhase1Date: new Date('2026-06-10T10:00:00+03:00'), // Stage 1 для 84-100
+  mintPhase2Date: new Date('2026-06-24T10:00:00+03:00'), // Stage 2 для 80-83
   threshold: 80,
-  txLabel: 'SEASON9_BADGE_MINT'
+  txLabel: 'SEASON10_BADGE_MINT'
 }
